@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from core.auth import require_user
@@ -5,8 +7,8 @@ from db import queries
 from models.schemas import CreateOrderRequest, CreateOrderResponse
 from services.quota import TIER_LIMITS, get_quota_remaining
 from services.razorpay import (
+    TIER_AMOUNTS,
     create_order,
-    subscription_period_end,
     verify_webhook_signature,
 )
 
@@ -43,16 +45,29 @@ async def razorpay_webhook(request: Request):
     if not verify_webhook_signature(payload_bytes, signature):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid signature")
 
-    import json
     data = json.loads(payload_bytes)
     event = data.get("event")
 
     if event == "payment.captured":
         payment = data["payload"]["payment"]["entity"]
+        order_id = payment.get("order_id")
+
+        # Bug #3: never verified captured amount matched the expected tier price —
+        # a partial-capture forged event would still upgrade the user
+        sub_row = await queries.get_subscription_by_order_id(order_id)
+        if not sub_row:
+            return {"status": "ok"}
+
+        expected_amount = TIER_AMOUNTS.get(sub_row["tier"])
+        if expected_amount and payment.get("amount") != expected_amount:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Amount mismatch: expected {expected_amount}, got {payment.get('amount')}",
+            )
+
         row = await queries.activate_subscription(
             payment_id=payment["id"],
-            order_id=payment["order_id"],
-            period_end=subscription_period_end(),
+            order_id=order_id,
         )
         if row:
             await queries.update_user_tier(str(row["user_id"]), row["tier"])
