@@ -68,7 +68,17 @@ async def refresh(body: RefreshRequest):
     raw_refresh, hashed_refresh, expires = generate_refresh_token()
     await queries.store_refresh_token(user_id, hashed_refresh, expires)
 
-    return TokenResponse(access_token=access_token, refresh_token=raw_refresh)
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=raw_refresh,
+        user=UserInfo(
+            id=user_id,
+            email=user.get("email"),
+            name=user.get("display_name"),
+            avatar_url=user.get("avatar_url"),
+            tier=user["tier"],
+        ),
+    )
 
 
 @router.post("/logout", status_code=204)
