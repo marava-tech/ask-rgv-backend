@@ -1,6 +1,6 @@
 # Ask RGV Backend — build all service images → push to GHCR → SSH deploy on VPS.
 #
-# Trigger: PR merged into main.
+# Trigger: push to main (direct or via merged PR).
 #
 # Images built:
 #   ghcr.io/marava-tech/askrgv-backend:latest
@@ -15,9 +15,12 @@
 name: Deploy backend
 
 on:
-  pull_request:
-    types: [closed]
+  push:
     branches: [main]
+
+permissions:
+  contents: read
+  packages: write
 
 concurrency:
   group: askrgv-backend-${{ github.ref }}
@@ -28,11 +31,7 @@ env:
 
 jobs:
   build-and-deploy:
-    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
 
     steps:
       - name: Checkout
