@@ -9,6 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from pipeline import run_pipeline
 from qdrant_writer import toggle_chunks
+from transcript import extract_video_id
 
 
 class Settings(BaseSettings):
@@ -59,7 +60,13 @@ def health():
 
 @app.post("/ingest/single")
 async def ingest_single(body: IngestRequest):
-    job_id = str(uuid.uuid4())
+    # Bug #16: main.py generated a new UUID and returned it as job_id, but pipeline.py's
+    # ON CONFLICT kept the original row's id — client's job_id didn't exist in DB (404 on status).
+    # Fix: look up existing row by video_id first so returned job_id always matches DB.
+    video_id = extract_video_id(body.url)
+    existing = await _pool.fetchrow("SELECT id FROM ingestion_log WHERE video_id = $1", video_id)
+    job_id = str(existing["id"]) if existing else str(uuid.uuid4())
+
     task = asyncio.create_task(
         run_pipeline(job_id, body.url, body.language, _pool, settings)
     )
@@ -71,7 +78,9 @@ async def ingest_single(body: IngestRequest):
 async def ingest_bulk(body: BulkIngestRequest):
     job_ids = []
     for url in body.urls:
-        job_id = str(uuid.uuid4())
+        video_id = extract_video_id(url)
+        existing = await _pool.fetchrow("SELECT id FROM ingestion_log WHERE video_id = $1", video_id)
+        job_id = str(existing["id"]) if existing else str(uuid.uuid4())
         task = asyncio.create_task(
             run_pipeline(job_id, url, body.language, _pool, settings)
         )

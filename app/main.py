@@ -1,3 +1,4 @@
+import logging
 import httpx
 from contextlib import asynccontextmanager
 
@@ -10,12 +11,29 @@ from core.config import settings
 from db.pool import close_pool, init_pool
 from routers import admin, auth, conversation, quotes, subscription, voice
 
+logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
 
 
-async def _reset_daily_quotas():
-    """Runs at midnight IST — Redis keys expire naturally, nothing to do.
-    This job cleans up expired refresh tokens and old sessions from Postgres."""
+async def _with_leader_lock(name: str, fn, ttl: int = 290) -> None:
+    """Runs fn only if this worker acquires a Redis SETNX lock — prevents duplicate
+    scheduler executions when multiple Gunicorn workers each start their own scheduler.
+    Bug #13: with WORKERS=4, four schedulers fired the same job four times at midnight."""
+    from services.quota import get_redis
+    r = get_redis()
+    lock_key = f"scheduler:lock:{name}"
+    acquired = await r.set(lock_key, "1", nx=True, ex=ttl)
+    if not acquired:
+        return
+    try:
+        await fn()
+    finally:
+        await r.delete(lock_key)
+
+
+async def _nightly_cleanup():
+    """Runs at midnight IST — cleans up expired refresh tokens and old sessions.
+    Bug #27: was named _reset_daily_quotas but never touched quotas (they expire via Redis TTL)."""
     try:
         from db.pool import get_pool
         pool = get_pool()
@@ -27,34 +45,22 @@ async def _reset_daily_quotas():
             "DELETE FROM crisis_events WHERE timestamp < now() - interval '1 year'"
         )
     except Exception as e:
-        print(f"[scheduler] quota reset error: {e}")
+        logger.error("[scheduler] nightly_cleanup error: %s", e)
 
 
-async def _send_quote_of_day():
-    """Runs at 9 AM IST — sends FCM push notification with today's quote."""
-    try:
-        from db.pool import get_pool
-        pool = get_pool()
-        quote = await pool.fetchrow(
-            "SELECT text, source FROM quotes WHERE active = true ORDER BY random() LIMIT 1"
-        )
-        if not quote:
-            return
-        users = await pool.fetch(
-            "SELECT id FROM users WHERE tier IN ('fan', 'super_fan')"
-        )
-        if not users:
-            return
-        print(f"[scheduler] quote-of-day sent to {len(users)} users: {quote['text'][:60]}...")
-    except Exception as e:
-        print(f"[scheduler] quote-of-day error: {e}")
+async def _nightly_cleanup_with_lock():
+    await _with_leader_lock("nightly_cleanup", _nightly_cleanup)
+
+
+# Bug #14: quote-of-day scheduler only printed; no FCM implementation existed.
+# Bug #28: quotes weren't grouped by user language.
+# Removed until FCM + user device tokens are implemented (Phase 8).
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_pool()
-    scheduler.add_job(_reset_daily_quotas, CronTrigger(hour=0, minute=0))
-    scheduler.add_job(_send_quote_of_day, CronTrigger(hour=9, minute=0))
+    scheduler.add_job(_nightly_cleanup_with_lock, CronTrigger(hour=0, minute=0))
     scheduler.start()
     yield
     scheduler.shutdown(wait=False)
@@ -93,7 +99,9 @@ async def health():
 
     try:
         import redis.asyncio as aioredis
-        r = aioredis.from_url(settings.redis_url)
+        # Bug #20: health check used DB 0 while the rest of the app uses DB 1;
+        # Redis DB 1 could be broken while health reported green
+        r = aioredis.from_url(settings.redis_url, db=1)
         await r.ping()
         await r.aclose()
         checks["redis"] = "ok"

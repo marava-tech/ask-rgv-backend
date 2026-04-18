@@ -54,7 +54,14 @@ async def text_to_speech(
     if not body.text.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty text")
 
-    text = body.text[:2000]
+    # Bug #42: text was silently truncated to 2000 chars with no feedback to caller
+    if len(body.text) > 2000:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Text too long — maximum 2000 characters",
+        )
+
+    text = body.text
     language = body.language if body.language in ("en", "te", "hi") else "en"
 
     audio_bytes = await synthesise_speech(text, language)

@@ -1,6 +1,8 @@
 import asyncio
+import json
+import secrets
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from core.auth import create_admin_token, require_admin
@@ -10,11 +12,35 @@ from models.schemas import AdminLoginRequest, IngestBulkRequest, IngestSingleReq
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
+ADMIN_LOGIN_MAX_ATTEMPTS = 5
+ADMIN_LOGIN_WINDOW_SECONDS = 900  # 15 minutes
+
 
 @router.post("/auth/login")
-async def admin_login(body: AdminLoginRequest):
-    if body.password != settings.admin_password:
+async def admin_login(request: Request, body: AdminLoginRequest):
+    from services.quota import get_redis
+
+    # Bug #23: no rate limiting — unlimited brute-force password attempts
+    r = get_redis()
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    client_host = request.client.host if request.client else ""
+    client_ip = (forwarded or client_host).split(",")[0].strip() or "unknown"
+    rate_key = f"admin:login:fail:{client_ip}"
+
+    fails = int(await r.get(rate_key) or 0)
+    if fails >= ADMIN_LOGIN_MAX_ATTEMPTS:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed attempts — try again in 15 minutes",
+        )
+
+    # Bug #7A: plain != comparison leaked timing info; use secrets.compare_digest
+    if not secrets.compare_digest(body.password, settings.admin_password):
+        await r.incr(rate_key)
+        await r.expire(rate_key, ADMIN_LOGIN_WINDOW_SECONDS)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Wrong password")
+
+    await r.delete(rate_key)
     return {"admin_token": create_admin_token()}
 
 
@@ -31,24 +57,35 @@ async def list_ingestion_jobs():
 
 @router.post("/ingestion/single", dependencies=[Depends(require_admin)])
 async def ingest_single(body: IngestSingleRequest):
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.post(
-            f"{settings.ingestion_worker_url}/ingest/single",
-            json={"url": body.url, "language": body.language},
-        )
-        r.raise_for_status()
-    return r.json()
+    # Bug #40: r.raise_for_status() raised httpx.HTTPStatusError → unhandled 500
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                f"{settings.ingestion_worker_url}/ingest/single",
+                json={"url": body.url, "language": body.language},
+            )
+            r.raise_for_status()
+        return r.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"Ingestion worker error: {e.response.status_code}")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Ingestion worker unreachable: {type(e).__name__}")
 
 
 @router.post("/ingestion/bulk", dependencies=[Depends(require_admin)])
 async def ingest_bulk(body: IngestBulkRequest):
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.post(
-            f"{settings.ingestion_worker_url}/ingest/bulk",
-            json={"urls": body.urls, "language": body.language},
-        )
-        r.raise_for_status()
-    return r.json()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                f"{settings.ingestion_worker_url}/ingest/bulk",
+                json={"urls": body.urls, "language": body.language},
+            )
+            r.raise_for_status()
+        return r.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"Ingestion worker error: {e.response.status_code}")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Ingestion worker unreachable: {type(e).__name__}")
 
 
 @router.get("/ingestion/job/{job_id}", dependencies=[Depends(require_admin)])
@@ -62,12 +99,17 @@ async def ingestion_job_status(job_id: str):
 @router.patch("/ingestion/{job_id}/toggle", dependencies=[Depends(require_admin)])
 async def toggle_ingestion(job_id: str, body: ToggleRequest):
     await queries.toggle_ingestion_job(job_id, body.enabled)
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.patch(
-            f"{settings.ingestion_worker_url}/ingest/{job_id}/toggle",
-            json={"enabled": body.enabled},
-        )
-        r.raise_for_status()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.patch(
+                f"{settings.ingestion_worker_url}/ingest/{job_id}/toggle",
+                json={"enabled": body.enabled},
+            )
+            r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"Ingestion worker error: {e.response.status_code}")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Ingestion worker unreachable: {type(e).__name__}")
     return {"status": "ok"}
 
 
@@ -122,7 +164,6 @@ async def _run_rag_validation():
     from services.qdrant_search import search_chunks
     from services.claude import haiku_call
     from db.pool import get_pool
-    import json
 
     TEST_QUERIES = [
         ("fear", "What does RGV say about fear?"),
@@ -168,7 +209,6 @@ async def _run_persona_qa():
     from services.prompt import assemble_prompt
     from services.claude import haiku_call
     from db.pool import get_pool
-    import json
 
     QUESTIONS = [
         "I believe hard work always leads to success.",
