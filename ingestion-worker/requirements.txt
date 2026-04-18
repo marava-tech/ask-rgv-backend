@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+asyncpg
+pydantic-settings
+faster-whisper
+yt-dlp
+tiktoken
+anthropic
+httpx
