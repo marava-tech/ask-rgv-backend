@@ -35,16 +35,25 @@ class AdminLoginRequest(BaseModel):
 
 class StartSessionRequest(BaseModel):
     device_id: str | None = None
+    mode: str = "default"
+
+
+class SessionData(BaseModel):
+    id: str
+    mode: str = "default"
+    language: str = "en"
+    started_at: str
 
 
 class StartSessionResponse(BaseModel):
-    session_id: str
+    session: SessionData
 
 
 class TurnRequest(BaseModel):
     session_id: str
     message: str
     mode: Literal["default", "hard_truth"] = "default"
+    device_id: str | None = None
 
 
 class UsageRequest(BaseModel):
