@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
@@ -10,6 +11,7 @@ from db import queries
 from models.schemas import (
     EndSessionRequest,
     InterruptRequest,
+    SessionData,
     StartSessionRequest,
     StartSessionResponse,
     TurnRequest,
@@ -40,14 +42,19 @@ async def start_session(body: StartSessionRequest, user: dict | None = Depends(g
     else:
         import uuid
         session_id = str(uuid.uuid4())
-    return StartSessionResponse(session_id=session_id)
+    return StartSessionResponse(session=SessionData(
+        id=session_id,
+        mode=body.mode,
+        language="en",
+        started_at=datetime.now(timezone.utc).isoformat(),
+    ))
 
 
 @router.post("/turn")
 async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_current_user)):
     user_id = user["sub"] if user else None
     tier = user.get("tier", "anonymous") if user else "anonymous"
-    device_id = body.session_id
+    device_id = body.device_id
 
     async def event_stream():
         quota_remaining = await get_quota_remaining(user_id, device_id, tier)
@@ -55,20 +62,20 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
             yield _sse("quota_exhausted", {"tier": tier})
             return
 
+        # Resolve language from cache before crisis check so safety responses use correct language
+        lang = await get_session_language(body.session_id)
+        if lang is None:
+            lang = detect_language(body.message)
+            await set_session_language(body.session_id, lang)
+
         is_crisis, trigger = detect_crisis(body.message)
         if is_crisis:
-            lang = await get_session_language(body.session_id) or "en"
             asyncio.create_task(
                 queries.log_crisis_event(body.session_id if user_id else None, trigger)
             )
             yield _sse("safety", {"text": get_safety_response(lang)})
             yield _sse("done", {})
             return
-
-        lang = await get_session_language(body.session_id)
-        if lang is None:
-            lang = detect_language(body.message)
-            await set_session_language(body.session_id, lang)
 
         history, rag_chunks, style_anchors, intent = await asyncio.gather(
             session_svc.get_history(body.session_id),
@@ -121,14 +128,14 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
         new_used = await add_quota_usage(user_id, device_id, turn_seconds)
         limit = TIER_LIMITS.get(tier, 300)
 
+        if limit != -1 and new_used >= limit:
+            yield _sse("quota_exhausted", {"tier": tier, "upgrade_url": "/subscription"})
+
         yield _sse("done", {
             "latency_ms": latency_ms,
             "rag_chunks": len(rag_chunks),
             "turn_seconds": turn_seconds,
         })
-
-        if limit != -1 and new_used >= limit:
-            yield _sse("quota_exhausted", {"tier": tier, "upgrade_url": "/subscription"})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -156,19 +163,19 @@ async def end_session(body: EndSessionRequest, user: dict | None = Depends(get_c
     await session_svc.clear_session(body.session_id)
 
 
-@router.get("/history")
+@router.get("/sessions")
 async def conversation_history(
     limit: int = 20, offset: int = 0, user: dict = Depends(get_current_user)
 ):
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
     sessions = await queries.get_user_sessions(user["sub"], limit, offset)
-    return {"sessions": [dict(s) for s in sessions]}
+    return [dict(s) for s in sessions]
 
 
-@router.get("/session/{session_id}")
+@router.get("/sessions/{session_id}/turns")
 async def get_session_detail(session_id: str, user: dict = Depends(get_current_user)):
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
     turns = await queries.get_session_turns(session_id)
-    return {"turns": [dict(t) for t in turns]}
+    return [dict(t) for t in turns]
