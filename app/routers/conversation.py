@@ -145,7 +145,7 @@ async def record_usage(body: UsageRequest, user: dict | None = Depends(get_curre
     if user and body.turn_id:
         await queries.update_turn_audio_seconds(body.turn_id, body.played_seconds)
     user_id = user["sub"] if user else None
-    await add_quota_usage(user_id, body.session_id, body.played_seconds)
+    await add_quota_usage(user_id, body.device_id, body.played_seconds)
 
 
 @router.post("/interrupt", status_code=204)
@@ -153,7 +153,7 @@ async def interrupt_turn(body: InterruptRequest, user: dict | None = Depends(get
     if user and body.active_turn_id:
         await queries.update_turn_audio_seconds(body.active_turn_id, body.played_seconds)
     user_id = user["sub"] if user else None
-    await add_quota_usage(user_id, body.session_id, body.played_seconds)
+    await add_quota_usage(user_id, body.device_id, body.played_seconds)
 
 
 @router.post("/end", status_code=204)
