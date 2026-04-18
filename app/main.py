@@ -65,11 +65,7 @@ app = FastAPI(title="Ask RGV API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://ask-rgv-dashboard.marava.tech",
-        "http://localhost:3000",
-        "http://localhost:3700",
-    ],
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
