@@ -116,7 +116,7 @@ jobs:
             docker exec askrgv-postgres psql -U askrgv -d askrgv -c \
               "CREATE TABLE IF NOT EXISTS schema_migrations (filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT NOW());"
 
-            for f in $(ls /tmp/askrgv-migrations-ci/migrations/*.sql | sort); do
+            for f in $(find /tmp/askrgv-migrations-ci/migrations -name '*.sql' | sort); do
               fname=$(basename "$f")
               applied=$(docker exec askrgv-postgres psql -U askrgv -d askrgv -tAc \
                 "SELECT 1 FROM schema_migrations WHERE filename='$fname'")
