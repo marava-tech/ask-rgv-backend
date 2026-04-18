@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     admin_jwt_secret: str
     admin_password: str
     admin_ip_allowlist: str = ""
+    cors_allowed_origins: str = "https://ask-rgv-dashboard.marava.tech"
 
     anthropic_api_key: str
 
@@ -30,6 +31,10 @@ class Settings(BaseSettings):
     firebase_service_account_path: str = "/app/firebase-service-account.json"
     app_env: str = "production"
     workers: int = 4
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
 
     @property
     def admin_ip_list(self) -> list[str]:
