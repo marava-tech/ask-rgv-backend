@@ -1,0 +1,209 @@
+# Ask RGV AI — Complete self-contained stack
+# Portable: copy this folder to any server and run:
+#   docker compose --env-file .env up -d
+#
+# No external network or service dependencies.
+# All services communicate on ask-rgv-internal network.
+
+services:
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: askrgv-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: askrgv
+      POSTGRES_USER: askrgv
+      POSTGRES_PASSWORD: ${ASKRGV_POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U askrgv -d askrgv"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  # ── Redis (ask-rgv dedicated) ─────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: askrgv-redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redisdata:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  # ── Qdrant ────────────────────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: askrgv-qdrant
+    restart: unless-stopped
+    volumes:
+      - qdrantdata:/qdrant/storage
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 1536m
+
+  # ── BGE-M3 Embedding Service ──────────────────────────────────────────────
+  bge-m3:
+    build:
+      context: ./embeddings
+      dockerfile: Dockerfile
+
+    container_name: askrgv-bge-m3
+    restart: unless-stopped
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\""]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 90s
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+
+  # ── Ingestion Worker ──────────────────────────────────────────────────────
+  ingestion:
+    build:
+      context: ./ingestion-worker
+      dockerfile: Dockerfile
+    container_name: askrgv-ingestion
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://askrgv:${ASKRGV_POSTGRES_PASSWORD}@postgres:5432/askrgv
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: rgv_knowledge
+      EMBEDDING_SERVICE_URL: http://bge-m3:8001
+      REDIS_URL: redis://redis:6379/0
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    volumes:
+      - /tmp/askrgv-ingestion:/tmp
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      bge-m3:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+
+  # ── FastAPI Backend ───────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: askrgv-backend
+    restart: unless-stopped
+    ports:
+      - "8700:8000"
+    environment:
+      DATABASE_URL: postgresql://askrgv:${ASKRGV_POSTGRES_PASSWORD}@postgres:5432/askrgv
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: rgv_knowledge
+      EMBEDDING_SERVICE_URL: http://bge-m3:8001
+      INGESTION_WORKER_URL: http://ingestion:8002
+      REDIS_URL: redis://redis:6379/0
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      JWT_SECRET: ${JWT_SECRET}
+      ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      ADMIN_IP_ALLOWLIST: ${ADMIN_IP_ALLOWLIST}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET}
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY}
+      SMALLEST_AI_API_KEY: ${SMALLEST_AI_API_KEY}
+      SMALLEST_AI_VOICE_EN: ${SMALLEST_AI_VOICE_EN}
+      SMALLEST_AI_VOICE_TE: ${SMALLEST_AI_VOICE_TE}
+      SMALLEST_AI_VOICE_HI: ${SMALLEST_AI_VOICE_HI}
+      FIREBASE_SERVICE_ACCOUNT_PATH: ${FIREBASE_SERVICE_ACCOUNT_PATH:-/app/firebase-service-account.json}
+      APP_ENV: ${APP_ENV:-production}
+      WORKERS: ${WORKERS:-4}
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      bge-m3:
+        condition: service_started
+      ingestion:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  # ── Admin Dashboard ───────────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: ../dashboard
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: https://ask-rgv-backend.marava.tech
+    container_name: askrgv-dashboard
+    restart: unless-stopped
+    ports:
+      - "3700:80"
+    networks:
+      - internal
+
+volumes:
+  pgdata:
+  redisdata:
+  qdrantdata:
+  hf-cache:
+
+networks:
+  internal:
+    name: ask-rgv-network
+    driver: bridge

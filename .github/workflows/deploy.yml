@@ -1,0 +1,139 @@
+# Ask RGV Backend — build all service images → push to GHCR → SSH deploy on VPS.
+#
+# Trigger: PR merged into main.
+#
+# Images built:
+#   ghcr.io/marava-tech/askrgv-backend:latest
+#   ghcr.io/marava-tech/askrgv-ingestion:latest
+#   ghcr.io/marava-tech/askrgv-bge-m3:latest
+#
+# Secrets required (repo → Settings → Secrets and variables → Actions):
+#   SERVER_HOST       VPS IP or hostname
+#   SERVER_USER       e.g. root
+#   SERVER_SSH_KEY    Full private key PEM (include BEGIN/END lines)
+
+name: Deploy backend
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+concurrency:
+  group: askrgv-backend-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-deploy:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push — backend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          push: true
+          tags: ${{ env.REGISTRY }}/marava-tech/askrgv-backend:latest
+          cache-from: type=gha,scope=askrgv-backend
+          cache-to: type=gha,mode=max,scope=askrgv-backend
+
+      - name: Build and push — ingestion
+        uses: docker/build-push-action@v6
+        with:
+          context: ./ingestion-worker
+          push: true
+          tags: ${{ env.REGISTRY }}/marava-tech/askrgv-ingestion:latest
+          cache-from: type=gha,scope=askrgv-ingestion
+          cache-to: type=gha,mode=max,scope=askrgv-ingestion
+
+      - name: Build and push — bge-m3
+        uses: docker/build-push-action@v6
+        with:
+          context: ./embeddings
+          push: true
+          tags: ${{ env.REGISTRY }}/marava-tech/askrgv-bge-m3:latest
+          cache-from: type=gha,scope=askrgv-bge-m3
+          cache-to: type=gha,mode=max,scope=askrgv-bge-m3
+
+      - name: Check SSH secrets
+        env:
+          SERVER_HOST_VAL: ${{ secrets.SERVER_HOST }}
+          SERVER_USER_VAL: ${{ secrets.SERVER_USER }}
+          SERVER_KEY_VAL: ${{ secrets.SERVER_SSH_KEY }}
+        run: |
+          ok=0
+          [ -z "$SERVER_HOST_VAL" ] && echo "::error::Secret SERVER_HOST is missing." && ok=1
+          [ -z "$SERVER_USER_VAL" ] && echo "::error::Secret SERVER_USER is missing." && ok=1
+          [ -z "$SERVER_KEY_VAL"  ] && echo "::error::Secret SERVER_SSH_KEY is missing." && ok=1
+          exit "$ok"
+
+      - name: Copy migrations to server
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          source: "migrations/"
+          target: /tmp/askrgv-migrations-ci/
+
+      - name: Deploy on server via SSH
+        uses: appleboy/ssh-action@v1.2.1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          command_timeout: 15m
+          script: |
+            set -euo pipefail
+            COMPOSE="docker compose -f /root/server-setup/services/ask-rgv-backend/docker-compose.yml --env-file /root/server-setup/.env"
+
+            $COMPOSE up -d --no-recreate askrgv-postgres askrgv-redis askrgv-qdrant
+
+            for i in $(seq 1 15); do
+              docker exec askrgv-postgres pg_isready -U askrgv -d askrgv && break
+              echo "Waiting for postgres... ($i/15)"; sleep 2
+            done
+
+            docker exec askrgv-postgres psql -U askrgv -d askrgv -c \
+              "CREATE TABLE IF NOT EXISTS schema_migrations (filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT NOW());"
+
+            for f in $(ls /tmp/askrgv-migrations-ci/migrations/*.sql | sort); do
+              fname=$(basename "$f")
+              applied=$(docker exec askrgv-postgres psql -U askrgv -d askrgv -tAc \
+                "SELECT 1 FROM schema_migrations WHERE filename='$fname'")
+              if [ -z "$applied" ]; then
+                echo "Applying $fname..."
+                docker exec -i askrgv-postgres psql -U askrgv -d askrgv < "$f"
+                docker exec askrgv-postgres psql -U askrgv -d askrgv -c \
+                  "INSERT INTO schema_migrations (filename) VALUES ('$fname');"
+              else
+                echo "Skipping $fname (already applied)"
+              fi
+            done
+
+            $COMPOSE pull askrgv-backend askrgv-ingestion askrgv-bge-m3
+            $COMPOSE up -d --force-recreate askrgv-backend askrgv-ingestion askrgv-bge-m3
+
+            docker image prune -f
+            sleep 10
+            docker logs askrgv-backend --tail 30
