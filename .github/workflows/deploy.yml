@@ -64,6 +64,8 @@ jobs:
 
   build-bge-m3:
     runs-on: ubuntu-latest
+    outputs:
+      rebuilt: ${{ steps.filter.outputs.embeddings }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -118,11 +120,14 @@ jobs:
 
       - name: Deploy on server via SSH
         uses: appleboy/ssh-action@v1.2.1
+        env:
+          BGE_REBUILT: ${{ needs.build-bge-m3.outputs.rebuilt }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           command_timeout: 15m
+          envs: BGE_REBUILT
           script: |
             set -euo pipefail
             COMPOSE="docker compose -f /root/server-setup/services/ask-rgv-backend/docker-compose.yml --env-file /root/server-setup/.env"
@@ -151,8 +156,29 @@ jobs:
               fi
             done
 
-            $COMPOSE pull askrgv-backend askrgv-ingestion askrgv-bge-m3
-            $COMPOSE up -d --force-recreate askrgv-backend askrgv-ingestion askrgv-bge-m3
+            pull_with_retry() {
+              local service=$1
+              for attempt in 1 2 3; do
+                echo "Pulling $service (attempt $attempt)..."
+                $COMPOSE pull "$service" && return 0
+                [ $attempt -lt 3 ] && echo "Retrying in 15s..." && sleep 15
+              done
+              echo "ERROR: failed to pull $service after 3 attempts" && return 1
+            }
+
+            pull_with_retry askrgv-backend
+            pull_with_retry askrgv-ingestion
+
+            if [ "${BGE_REBUILT}" = "true" ]; then
+              echo "embeddings/ changed — pulling bge-m3"
+              pull_with_retry askrgv-bge-m3
+              $COMPOSE up -d --force-recreate askrgv-bge-m3
+            else
+              echo "embeddings/ unchanged — skipping bge-m3 pull"
+              $COMPOSE up -d --no-recreate askrgv-bge-m3
+            fi
+
+            $COMPOSE up -d --force-recreate askrgv-backend askrgv-ingestion
 
             docker image prune -f
             sleep 10
