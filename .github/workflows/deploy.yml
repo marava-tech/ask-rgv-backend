@@ -109,77 +109,77 @@ jobs:
           [ -z "$SERVER_KEY_VAL"  ] && echo "::error::Secret SERVER_SSH_KEY is missing." && ok=1
           exit "$ok"
 
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts
+
       - name: Copy migrations to server
-        uses: appleboy/scp-action@v1
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          source: "migrations/"
-          target: /tmp/askrgv-migrations-ci/
+        run: |
+          scp -i ~/.ssh/deploy_key -r migrations/ \
+            "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/tmp/askrgv-migrations-ci/"
 
       - name: Deploy on server via SSH
-        uses: appleboy/ssh-action@v1.2.1
         env:
           BGE_REBUILT: ${{ needs.build-bge-m3.outputs.rebuilt }}
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          command_timeout: 15m
-          envs: BGE_REBUILT
-          script: |
-            set -euo pipefail
-            COMPOSE="docker compose -f /root/server-setup/services/ask-rgv-backend/docker-compose.yml --env-file /root/server-setup/.env"
+        run: |
+          ssh -i ~/.ssh/deploy_key -o ConnectTimeout=30 \
+            "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
+            "BGE_REBUILT='${BGE_REBUILT}' bash -s" << 'ENDSSH'
+          set -euo pipefail
+          COMPOSE="docker compose -f /root/server-setup/services/ask-rgv-backend/docker-compose.yml --env-file /root/server-setup/.env"
 
-            $COMPOSE up -d --no-recreate askrgv-postgres askrgv-redis askrgv-qdrant
+          $COMPOSE up -d --no-recreate askrgv-postgres askrgv-redis askrgv-qdrant
 
-            for i in $(seq 1 15); do
-              docker exec askrgv-postgres pg_isready -U askrgv -d askrgv && break
-              echo "Waiting for postgres... ($i/15)"; sleep 2
-            done
+          for i in $(seq 1 15); do
+            docker exec askrgv-postgres pg_isready -U askrgv -d askrgv && break
+            echo "Waiting for postgres... ($i/15)"; sleep 2
+          done
 
-            docker exec askrgv-postgres psql -U askrgv -d askrgv -c \
-              "CREATE TABLE IF NOT EXISTS schema_migrations (filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT NOW());"
+          docker exec askrgv-postgres psql -U askrgv -d askrgv -c \
+            "CREATE TABLE IF NOT EXISTS schema_migrations (filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT NOW());"
 
-            for f in $(find /tmp/askrgv-migrations-ci/migrations -name '*.sql' | sort); do
-              fname=$(basename "$f")
-              applied=$(docker exec askrgv-postgres psql -U askrgv -d askrgv -tAc \
-                "SELECT 1 FROM schema_migrations WHERE filename='$fname'")
-              if [ -z "$applied" ]; then
-                echo "Applying $fname..."
-                docker exec -i askrgv-postgres psql -U askrgv -d askrgv < "$f"
-                docker exec askrgv-postgres psql -U askrgv -d askrgv -c \
-                  "INSERT INTO schema_migrations (filename) VALUES ('$fname');"
-              else
-                echo "Skipping $fname (already applied)"
-              fi
-            done
-
-            pull_with_retry() {
-              local service=$1
-              for attempt in 1 2 3; do
-                echo "Pulling $service (attempt $attempt)..."
-                $COMPOSE pull "$service" && return 0
-                [ $attempt -lt 3 ] && echo "Retrying in 15s..." && sleep 15
-              done
-              echo "ERROR: failed to pull $service after 3 attempts" && return 1
-            }
-
-            pull_with_retry askrgv-backend
-            pull_with_retry askrgv-ingestion
-
-            if [ "${BGE_REBUILT}" = "true" ]; then
-              echo "embeddings/ changed — pulling bge-m3"
-              pull_with_retry askrgv-bge-m3
-              $COMPOSE up -d --force-recreate askrgv-bge-m3
+          for f in $(find /tmp/askrgv-migrations-ci/migrations -name '*.sql' | sort); do
+            fname=$(basename "$f")
+            applied=$(docker exec askrgv-postgres psql -U askrgv -d askrgv -tAc \
+              "SELECT 1 FROM schema_migrations WHERE filename='$fname'")
+            if [ -z "$applied" ]; then
+              echo "Applying $fname..."
+              docker exec -i askrgv-postgres psql -U askrgv -d askrgv < "$f"
+              docker exec askrgv-postgres psql -U askrgv -d askrgv -c \
+                "INSERT INTO schema_migrations (filename) VALUES ('$fname');"
             else
-              echo "embeddings/ unchanged — skipping bge-m3 pull"
-              $COMPOSE up -d --no-recreate askrgv-bge-m3
+              echo "Skipping $fname (already applied)"
             fi
+          done
 
-            $COMPOSE up -d --force-recreate askrgv-backend askrgv-ingestion
+          pull_with_retry() {
+            local service=$1
+            for attempt in 1 2 3; do
+              echo "Pulling $service (attempt $attempt)..."
+              $COMPOSE pull "$service" && return 0
+              [ $attempt -lt 3 ] && echo "Retrying in 15s..." && sleep 15
+            done
+            echo "ERROR: failed to pull $service after 3 attempts" && return 1
+          }
 
-            docker image prune -f
-            sleep 10
-            docker logs askrgv-backend --tail 30
+          pull_with_retry askrgv-backend
+          pull_with_retry askrgv-ingestion
+
+          if [ "${BGE_REBUILT}" = "true" ]; then
+            echo "embeddings/ changed — pulling bge-m3"
+            pull_with_retry askrgv-bge-m3
+            $COMPOSE up -d --force-recreate askrgv-bge-m3
+          else
+            echo "embeddings/ unchanged — skipping bge-m3 pull"
+            $COMPOSE up -d --no-recreate askrgv-bge-m3
+          fi
+
+          $COMPOSE up -d --force-recreate askrgv-backend askrgv-ingestion
+
+          docker image prune -f
+          sleep 10
+          docker logs askrgv-backend --tail 30
+          ENDSSH
