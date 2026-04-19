@@ -5,7 +5,6 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from core.auth import (
     create_access_token,
-    create_admin_token,
     generate_refresh_token,
     hash_token,
     require_user,
@@ -13,7 +12,7 @@ from core.auth import (
 )
 from core.config import settings
 from db import queries
-from models.schemas import AdminLoginRequest, GoogleAuthRequest, LogoutRequest, RefreshRequest, TokenResponse, UserInfo
+from models.schemas import GoogleAuthRequest, LogoutRequest, RefreshRequest, TokenResponse, UserInfo
 from services.quota import blacklist_jwt, is_jwt_blacklisted
 
 router = APIRouter(prefix="/auth", tags=["auth"])

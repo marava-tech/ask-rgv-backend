@@ -33,6 +33,8 @@ async def _with_leader_lock(name: str, fn, ttl: int = 290) -> None:
 
 async def _nightly_cleanup():
     """Runs at midnight IST — cleans up expired refresh tokens and old sessions.
+
+    Refresh rows use expires_at (rolling window for mobile clients, see REFRESH_TOKEN_TTL in core.auth).
     Bug #27: was named _reset_daily_quotas but never touched quotas (they expire via Redis TTL)."""
     try:
         from db.pool import get_pool
