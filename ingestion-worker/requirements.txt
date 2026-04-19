@@ -4,6 +4,7 @@ asyncpg
 pydantic-settings
 faster-whisper
 yt-dlp
+pytubefix
 tiktoken
 anthropic
 httpx

@@ -30,7 +30,7 @@ async def run_pipeline(job_id: str, url: str, source_language: str, pool: asyncp
         """
         INSERT INTO ingestion_log (id, source_url, video_id, source_language, status, current_step, progress_pct)
         VALUES ($1, $2, $3, $4, 'extracting_transcript', 'Checking YouTube for captions (yt-dlp)...', 10)
-        ON CONFLICT (video_id) DO UPDATE SET
+        ON CONFLICT (video_id) WHERE video_id IS NOT NULL DO UPDATE SET
             status = 'extracting_transcript', current_step = 'Checking YouTube for captions (yt-dlp)...',
             progress_pct = 10, error_message = NULL
         RETURNING id
