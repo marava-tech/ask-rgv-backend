@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -17,9 +18,11 @@ ACCESS_TOKEN_TTL = timedelta(hours=1)
 REFRESH_TOKEN_TTL = timedelta(days=30)
 
 
-def verify_google_token(token: str) -> dict:
-    return id_token.verify_oauth2_token(
-        token, google_requests.Request(), settings.google_client_id
+async def verify_google_token(token: str) -> dict:
+    # Bug #19: was synchronous blocking call; wrapped in thread to avoid blocking event loop
+    return await asyncio.to_thread(
+        id_token.verify_oauth2_token,
+        token, google_requests.Request(), settings.google_client_id,
     )
 
 
@@ -71,6 +74,12 @@ async def get_current_user(
         return None
     try:
         payload = decode_access_token(credentials.credentials)
+        # Bug #1: JWT blacklist was never checked — logged-out tokens stayed valid for 1h TTL
+        jti = payload.get("jti")
+        if jti:
+            from services.quota import is_jwt_blacklisted
+            if await is_jwt_blacklisted(jti):
+                return None
         return payload
     except jwt.PyJWTError:
         return None
@@ -84,8 +93,11 @@ async def require_user(user: dict | None = Depends(get_current_user)) -> dict:
 
 async def require_admin(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)):
     if settings.admin_ip_list:
-        client_ip = request.headers.get("X-Forwarded-For", request.client.host).split(",")[0].strip()
-        if client_ip not in settings.admin_ip_list:
+        # Bug #7B: request.client can be None (unix socket / tests); was crashing with AttributeError
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        client_host = request.client.host if request.client else ""
+        client_ip = (forwarded or client_host).split(",")[0].strip()
+        if not client_ip or client_ip not in settings.admin_ip_list:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="IP not allowed")
     if credentials is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin token required")
