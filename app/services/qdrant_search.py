@@ -30,7 +30,7 @@ async def hybrid_search(query_text: str) -> list[dict]:
         "vector": {
             "name": "sparse",
             "vector": {
-                "indices": embedding["sparse"]["indices"],
+                "indices": [int(i) for i in embedding["sparse"]["indices"]],
                 "values": embedding["sparse"]["values"],
             },
         },
