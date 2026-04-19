@@ -114,7 +114,15 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -T 10 -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null \
+            || echo "::warning::ssh-keyscan timed out — falling back to StrictHostKeyChecking=accept-new"
+          cat >> ~/.ssh/config <<'EOF'
+          Host *
+            StrictHostKeyChecking accept-new
+            ConnectTimeout 30
+            ServerAliveInterval 30
+            ServerAliveCountMax 3
+          EOF
 
       - name: Copy migrations to server
         run: |
@@ -125,7 +133,7 @@ jobs:
         env:
           BGE_REBUILT: ${{ needs.build-bge-m3.outputs.rebuilt }}
         run: |
-          ssh -i ~/.ssh/deploy_key -o ConnectTimeout=30 \
+          ssh -i ~/.ssh/deploy_key \
             "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
             "BGE_REBUILT='${BGE_REBUILT}' bash -s" << 'ENDSSH'
           set -euo pipefail
