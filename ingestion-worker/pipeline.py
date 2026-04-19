@@ -113,4 +113,5 @@ async def run_pipeline(job_id: str, url: str, source_language: str, pool: asyncp
         )
 
     except Exception as e:
-        await _update(pool, job_id, status="failed", current_step="Failed", error_message=str(e))
+        msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        await _update(pool, job_id, status="failed", current_step="Failed", error_message=msg)
