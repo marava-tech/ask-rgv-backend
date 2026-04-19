@@ -8,6 +8,31 @@ _whisper_model: WhisperModel | None = None
 _COOKIES_PATH = "/tmp/youtube-cookies.txt"
 
 
+def ytta_transcript(video_id: str, language: str) -> str | None:
+    """
+    Fetch transcript via youtube_transcript_api (no audio download).
+    Uses cookies file if present to bypass VPS IP blocks.
+    Returns plain text or None if unavailable.
+    """
+    try:
+        import requests
+        from http.cookiejar import MozillaCookieJar
+        from youtube_transcript_api import YouTubeTranscriptApi
+
+        session = requests.Session()
+        if os.path.exists(_COOKIES_PATH):
+            jar = MozillaCookieJar(_COOKIES_PATH)
+            jar.load(ignore_discard=True, ignore_expires=True)
+            session.cookies = jar  # type: ignore[assignment]
+
+        api = YouTubeTranscriptApi(http_client=session)
+        languages = [language, "en"] if language != "en" else ["en"]
+        fetched = api.fetch(video_id, languages=languages)
+        return " ".join(s.text for s in fetched.snippets)
+    except Exception:
+        return None
+
+
 def _get_whisper() -> WhisperModel:
     global _whisper_model
     if _whisper_model is None:
