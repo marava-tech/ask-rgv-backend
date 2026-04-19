@@ -5,6 +5,7 @@ pydantic-settings
 faster-whisper
 yt-dlp
 pytubefix
+youtube_transcript_api
 tiktoken
 anthropic
 httpx

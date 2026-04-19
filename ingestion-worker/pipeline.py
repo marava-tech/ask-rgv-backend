@@ -7,7 +7,7 @@ from chunker import chunk_text
 from embedder import embed_chunks
 from quality import score_chunks
 from qdrant_writer import ensure_collection, upsert_chunks
-from transcript import extract_video_id, get_video_title, whisper_transcript, ytdlp_transcript
+from transcript import extract_video_id, get_video_title, whisper_transcript, ytdlp_transcript, ytta_transcript
 from translator import translate_to_english
 
 
@@ -40,17 +40,22 @@ async def run_pipeline(job_id: str, url: str, source_language: str, pool: asyncp
     job_id = str(row["id"])  # Use actual DB id — may differ from caller's UUID on re-ingest
 
     try:
-        # STEP 1: transcript
-        transcript_method = "ytdlp"
-        raw_transcript = ytdlp_transcript(url, source_language)
+        # STEP 1: transcript — try ytta → ytdlp subtitles → whisper (audio)
+        transcript_method = "ytta"
+        raw_transcript = ytta_transcript(video_id, source_language)
 
         if raw_transcript:
-            await _update(pool, job_id, progress_pct=30, current_step="Captions found ✓")
+            await _update(pool, job_id, progress_pct=30, current_step="Captions found via transcript API ✓")
         else:
-            await _update(pool, job_id, progress_pct=15, current_step="No captions found. Downloading audio...")
-            transcript_method = "whisper"
-            raw_transcript = whisper_transcript(url, source_language)
-            await _update(pool, job_id, progress_pct=30, current_step="Transcription complete ✓", transcript_method="whisper")
+            transcript_method = "ytdlp"
+            raw_transcript = ytdlp_transcript(url, source_language)
+            if raw_transcript:
+                await _update(pool, job_id, progress_pct=30, current_step="Captions found via yt-dlp ✓")
+            else:
+                await _update(pool, job_id, progress_pct=15, current_step="No captions found. Downloading audio...")
+                transcript_method = "whisper"
+                raw_transcript = whisper_transcript(url, source_language)
+                await _update(pool, job_id, progress_pct=30, current_step="Transcription complete ✓", transcript_method="whisper")
 
         if not raw_transcript:
             raise ValueError("Could not extract transcript via yt-dlp or Whisper")
