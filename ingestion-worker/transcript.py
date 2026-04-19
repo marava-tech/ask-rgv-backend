@@ -19,9 +19,20 @@ def whisper_loaded() -> bool:
     return _whisper_model is not None
 
 
+_YTDLP_BASE_ARGS = [
+    "--js-runtimes", "node",
+    "--remote-components", "ejs:github",
+]
+
+
 def _cookies_args() -> list[str]:
     """Return --cookies flag if the cookies file is present on disk."""
     return ["--cookies", _COOKIES_PATH] if os.path.exists(_COOKIES_PATH) else []
+
+
+def _ytdlp_args() -> list[str]:
+    """Base yt-dlp flags: JS runtime for n-challenge + cookies when available."""
+    return [*_YTDLP_BASE_ARGS, *_cookies_args()]
 
 
 def extract_video_id(url: str) -> str:
@@ -36,7 +47,7 @@ def ytdlp_transcript(url: str, language: str) -> str | None:
         subprocess.run(
             [
                 "yt-dlp",
-                *_cookies_args(),
+                *_ytdlp_args(),
                 "--write-subs", "--write-auto-subs",
                 "--skip-download",
                 "--sub-lang", sub_langs,
@@ -76,7 +87,7 @@ def _ytdlp_download_audio(url: str, tmpdir: str) -> str | None:
     result = subprocess.run(
         [
             "yt-dlp",
-            *_cookies_args(),
+            *_ytdlp_args(),
             "--format", "bestaudio",
             "--output", output_template,
             url,
@@ -127,7 +138,7 @@ def whisper_transcript(url: str, language: str, progress_cb=None) -> str:
 
 def get_video_title(url: str) -> str:
     result = subprocess.run(
-        ["yt-dlp", *_cookies_args(), "--get-title", url],
+        ["yt-dlp", *_ytdlp_args(), "--get-title", url],
         capture_output=True, text=True, timeout=30,
     )
     return result.stdout.strip() or url
