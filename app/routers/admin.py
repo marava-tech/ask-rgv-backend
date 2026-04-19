@@ -9,7 +9,13 @@ from fastapi.responses import JSONResponse
 from core.auth import create_admin_token, require_admin
 from core.config import settings
 from db import queries
-from models.schemas import AdminLoginRequest, IngestBulkRequest, IngestSingleRequest, ToggleRequest
+from models.schemas import (
+    AdminLoginRequest,
+    IngestBulkRequest,
+    IngestSingleRequest,
+    QuoteCreateRequest,
+    ToggleRequest,
+)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -45,11 +51,18 @@ async def admin_login(request: Request, body: AdminLoginRequest):
             detail="Too many failed attempts — try again in 15 minutes",
         )
 
-    # Bug #7A: plain != comparison leaked timing info; use secrets.compare_digest
-    if not secrets.compare_digest(body.password, settings.admin_password):
+    want_email = settings.admin_dashboard_email.strip().lower()
+    got_email = body.email.strip().lower()
+    # Always run password compare_digest so response time does not reveal email validity alone.
+    password_ok = secrets.compare_digest(body.password, settings.admin_password)
+    email_ok = got_email == want_email
+    if not (email_ok and password_ok):
         await r.incr(rate_key)
         await r.expire(rate_key, ADMIN_LOGIN_WINDOW_SECONDS)
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Wrong password")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+        )
 
     await r.delete(rate_key)
     return {"admin_token": create_admin_token()}
@@ -143,6 +156,32 @@ async def toggle_ingestion(job_id: str, body: ToggleRequest):
         raise HTTPException(status_code=502, detail=f"Ingestion worker error: {e.response.status_code}")
     except httpx.RequestError as e:
         raise HTTPException(status_code=502, detail=f"Ingestion worker unreachable: {type(e).__name__}")
+    return {"status": "ok"}
+
+
+@router.get("/quotes", dependencies=[Depends(require_admin)])
+async def list_quotes_admin(language: str | None = None):
+    if language is not None and language not in ("en", "te", "hi"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="language must be en, te, or hi when provided",
+        )
+    quotes = await queries.list_quotes_for_admin(language=language)
+    return {"quotes": quotes}
+
+
+@router.post("/quotes", dependencies=[Depends(require_admin)])
+async def create_quote(body: QuoteCreateRequest):
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Quote text cannot be empty")
+    quote = await queries.insert_quote(text=text, source=body.source, language=body.language)
+    return {"quote": quote}
+
+
+@router.patch("/quotes/{quote_id}/toggle", dependencies=[Depends(require_admin)])
+async def toggle_quote(quote_id: str, body: ToggleRequest):
+    await queries.set_quote_active(quote_id, body.enabled)
     return {"status": "ok"}
 
 
