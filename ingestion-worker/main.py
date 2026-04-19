@@ -3,13 +3,13 @@ import uuid
 from contextlib import asynccontextmanager
 
 import asyncpg
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from pipeline import run_pipeline
+from pipeline import run_pipeline, run_pipeline_from_transcript
 from qdrant_writer import toggle_chunks
-from transcript import extract_video_id
+from transcript import extract_video_id, transcript_from_file
 
 
 class Settings(BaseSettings):
@@ -60,9 +60,6 @@ def health():
 
 @app.post("/ingest/single")
 async def ingest_single(body: IngestRequest):
-    # Bug #16: main.py generated a new UUID and returned it as job_id, but pipeline.py's
-    # ON CONFLICT kept the original row's id — client's job_id didn't exist in DB (404 on status).
-    # Fix: look up existing row by video_id first so returned job_id always matches DB.
     video_id = extract_video_id(body.url)
     existing = await _pool.fetchrow("SELECT id FROM ingestion_log WHERE video_id = $1", video_id)
     job_id = str(existing["id"]) if existing else str(uuid.uuid4())
@@ -87,6 +84,32 @@ async def ingest_bulk(body: BulkIngestRequest):
         _jobs[job_id] = task
         job_ids.append(job_id)
     return {"job_ids": job_ids}
+
+
+@app.post("/ingest/transcript")
+async def ingest_transcript(
+    url: str = Form(...),
+    language: str = Form(...),
+    file: UploadFile = File(...),
+):
+    content = await file.read()
+    try:
+        transcript_text = transcript_from_file(content, file.filename or "upload.txt")
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    if not transcript_text.strip():
+        raise HTTPException(status_code=422, detail="Uploaded transcript is empty")
+
+    video_id = extract_video_id(url)
+    existing = await _pool.fetchrow("SELECT id FROM ingestion_log WHERE video_id = $1", video_id)
+    job_id = str(existing["id"]) if existing else str(uuid.uuid4())
+
+    task = asyncio.create_task(
+        run_pipeline_from_transcript(job_id, url, language, transcript_text, _pool, settings)
+    )
+    _jobs[job_id] = task
+    return {"job_id": job_id}
 
 
 @app.get("/ingest/job/{job_id}")

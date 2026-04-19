@@ -9,3 +9,4 @@ youtube_transcript_api
 tiktoken
 anthropic
 httpx
+python-multipart

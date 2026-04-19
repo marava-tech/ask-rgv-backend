@@ -2,7 +2,8 @@ import asyncio
 import json
 import secrets
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import Form as FastAPIForm
 from fastapi.responses import JSONResponse
 
 from core.auth import create_admin_token, require_admin
@@ -94,6 +95,28 @@ async def ingest_bulk(body: IngestBulkRequest):
         return r.json()
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=502, detail=f"Ingestion worker error: {e.response.status_code}")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Ingestion worker unreachable: {type(e).__name__}")
+
+
+@router.post("/ingestion/transcript", dependencies=[Depends(require_admin)])
+async def ingest_transcript(
+    url: str = FastAPIForm(...),
+    language: str = FastAPIForm(...),
+    file: UploadFile = File(...),
+):
+    content = await file.read()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(
+                f"{settings.ingestion_worker_url}/ingest/transcript",
+                data={"url": url, "language": language},
+                files={"file": (file.filename, content, file.content_type or "application/octet-stream")},
+            )
+            r.raise_for_status()
+        return r.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"Ingestion worker error: {e.response.text}")
     except httpx.RequestError as e:
         raise HTTPException(status_code=502, detail=f"Ingestion worker unreachable: {type(e).__name__}")
 
