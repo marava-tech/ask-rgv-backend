@@ -33,7 +33,7 @@ async def embed(request: EmbedRequest):
     return {
         "dense": results["dense_vecs"].tolist(),
         "sparse": [
-            {"indices": list(s.keys()), "values": list(s.values())}
+            {"indices": list(s.keys()), "values": [float(v) for v in s.values()]}
             for s in results["lexical_weights"]
         ],
     }

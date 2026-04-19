@@ -8,3 +8,4 @@ __pycache__/
 venv/
 firebase-service-account.json
 gcloud-service-account.json
+*.swp
