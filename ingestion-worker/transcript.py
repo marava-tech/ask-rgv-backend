@@ -121,10 +121,14 @@ def transcript_from_file(file_content: bytes, filename: str) -> str:
         try:
             data = json.loads(file_content.decode("utf-8"))
             if isinstance(data, list):
-                return " ".join(
-                    item.get("text", "") for item in data if isinstance(item, dict)
-                )
-            raise ValueError("JSON must be a list of {text: ...} objects")
+                items = data
+            elif isinstance(data, dict) and isinstance(data.get("blocks"), list):
+                items = data["blocks"]
+            else:
+                raise ValueError("JSON must be a list of {text:...} objects or an object with a 'blocks' array")
+            return " ".join(
+                item.get("text", "") for item in items if isinstance(item, dict)
+            )
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             raise ValueError(f"Invalid JSON transcript: {e}") from e
     elif filename.lower().endswith(".txt"):
