@@ -32,6 +32,10 @@ def verify_payment_signature(order_id: str, payment_id: str, signature: str) -> 
 
 
 def verify_webhook_signature(payload_bytes: bytes, signature: str) -> bool:
+    # Bug #2: empty webhook secret produced a deterministic HMAC that an attacker could forge;
+    # fail closed so a misconfigured deploy rejects all webhook events rather than accepting them
+    if not settings.razorpay_webhook_secret:
+        return False
     expected = hmac.new(
         settings.razorpay_webhook_secret.encode(),
         payload_bytes,

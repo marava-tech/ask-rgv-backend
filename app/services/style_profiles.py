@@ -10,7 +10,7 @@ CACHE_TTL = 3600
 def get_redis() -> aioredis.Redis:
     global _redis
     if _redis is None:
-        _redis = aioredis.from_url(settings.redis_url, decode_responses=True, db=1)
+        _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
     return _redis
 
 

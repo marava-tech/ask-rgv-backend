@@ -106,7 +106,7 @@ services:
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: rgv_knowledge
       EMBEDDING_SERVICE_URL: http://bge-m3:8001
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://redis:6379/1
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     volumes:
       - /tmp/askrgv-ingestion:/tmp
@@ -141,7 +141,7 @@ services:
       QDRANT_COLLECTION: rgv_knowledge
       EMBEDDING_SERVICE_URL: http://bge-m3:8001
       INGESTION_WORKER_URL: http://ingestion:8002
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://redis:6379/1
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       JWT_SECRET: ${JWT_SECRET}
       ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET}

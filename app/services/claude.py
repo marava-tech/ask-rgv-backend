@@ -21,10 +21,13 @@ async def haiku_call(prompt: str, system: str = "") -> str:
     if system:
         kwargs["system"] = system
     response = await client.messages.create(**kwargs)
-    return response.content[0].text
+    # Bug #37: non-text blocks (tool_use, thinking) would raise AttributeError on .text
+    text_blocks = [b for b in response.content if b.type == "text"]
+    return text_blocks[0].text if text_blocks else ""
 
 
-async def sonnet_stream(messages: list[dict], system_blocks: list[dict]):
+async def sonnet_stream(messages: list[dict], system_blocks: list[dict], usage_out: dict | None = None):
+    """Streams tokens; optionally writes final usage to usage_out dict (Bug #12)."""
     client = get_client()
     async with client.messages.stream(
         model="claude-sonnet-4-6",
@@ -34,3 +37,8 @@ async def sonnet_stream(messages: list[dict], system_blocks: list[dict]):
     ) as stream:
         async for text in stream.text_stream:
             yield text
+        # Bug #12: usage was discarded; persist to caller-supplied dict so tokens_used can be stored
+        if usage_out is not None:
+            final = await stream.get_final_message()
+            usage_out["input_tokens"] = final.usage.input_tokens
+            usage_out["output_tokens"] = final.usage.output_tokens

@@ -16,7 +16,8 @@ TIER_LIMITS = {
 def get_redis() -> aioredis.Redis:
     global _redis
     if _redis is None:
-        _redis = aioredis.from_url(settings.redis_url, decode_responses=True, db=1)
+        # Bug #21: db=1 was a code-override because REDIS_URL had /0; URL now uses /1 consistently
+        _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
     return _redis
 
 

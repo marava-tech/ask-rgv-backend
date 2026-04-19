@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 import anthropic
 import asyncpg
 
@@ -23,16 +24,20 @@ async def run_pipeline(job_id: str, url: str, source_language: str, pool: asyncp
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
     video_id = extract_video_id(url)
 
-    await pool.execute(
+    # Bug #16: ON CONFLICT keeps the original row id, not the new job_id passed in;
+    # use RETURNING id to get the real id so subsequent _update calls hit the correct row
+    row = await pool.fetchrow(
         """
         INSERT INTO ingestion_log (id, source_url, video_id, source_language, status, current_step, progress_pct)
         VALUES ($1, $2, $3, $4, 'extracting_transcript', 'Checking YouTube for captions (yt-dlp)...', 10)
         ON CONFLICT (video_id) DO UPDATE SET
             status = 'extracting_transcript', current_step = 'Checking YouTube for captions (yt-dlp)...',
             progress_pct = 10, error_message = NULL
+        RETURNING id
         """,
         uuid.UUID(job_id), url, video_id, source_language,
     )
+    job_id = str(row["id"])  # Use actual DB id — may differ from caller's UUID on re-ingest
 
     try:
         # STEP 1: transcript
@@ -58,7 +63,7 @@ async def run_pipeline(job_id: str, url: str, source_language: str, pool: asyncp
         # STEP 2: translate (skip if English)
         if source_language != "en":
             await _update(pool, job_id, status="translating", progress_pct=40,
-                          current_step=f"Translating transcript to English (Haiku)...")
+                          current_step="Translating transcript to English (Haiku)...")
             english_text = await translate_to_english(raw_transcript, source_language, client)
             await _update(pool, job_id, progress_pct=50, current_step="Translation complete ✓", translated=True)
         else:
@@ -100,10 +105,11 @@ async def run_pipeline(job_id: str, url: str, source_language: str, pool: asyncp
 
         await _update(pool, job_id, status="complete", progress_pct=100,
                       current_step="Done ✓", chunk_count=len(chunks))
-        import datetime
+        # Bug #30: datetime.utcnow() is naive and deprecated in Python 3.12;
+        # use timezone-aware datetime.now(timezone.utc) instead
         await pool.execute(
             "UPDATE ingestion_log SET ingested_at = $1 WHERE id = $2",
-            datetime.datetime.utcnow(), uuid.UUID(job_id),
+            datetime.now(timezone.utc), uuid.UUID(job_id),
         )
 
     except Exception as e:

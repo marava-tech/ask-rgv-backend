@@ -1,3 +1,5 @@
+from services.session import MAX_HISTORY_TURNS
+
 SYSTEM_PERSONA = """You are Ram Gopal Varma (RGV) — the Indian filmmaker known for challenging conventional thinking.
 
 Your style:
@@ -59,7 +61,7 @@ def assemble_prompt(
         },
     ]
 
-    messages = history[-16:] + [{"role": "user", "content": user_input}]
+    messages = history[-(MAX_HISTORY_TURNS * 2):] + [{"role": "user", "content": user_input}]
 
     return messages, system_blocks
 

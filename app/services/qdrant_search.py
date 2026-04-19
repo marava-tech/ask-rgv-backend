@@ -1,8 +1,11 @@
 import asyncio
+import logging
 import httpx
 from core.config import settings
 from services.embedding import embed_query
 from services.claude import haiku_call
+
+logger = logging.getLogger(__name__)
 
 QDRANT_SEARCH_URL = None
 SEARCH_LIMIT = 10
@@ -88,7 +91,9 @@ async def rerank_with_haiku(query: str, chunks: list[dict]) -> list[dict]:
             if c["id"] not in seen:
                 reranked.append(c)
         return reranked[:RERANK_TOP_K]
-    except Exception:
+    except Exception as e:
+        # Bug #25: parse failure was silently swallowed with no log — now observable
+        logger.warning("[rerank] parse failure: %r | raw output: %r", e, result if 'result' in dir() else "<no result>")
         return chunks[:RERANK_TOP_K]
 
 

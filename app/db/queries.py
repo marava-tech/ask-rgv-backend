@@ -40,10 +40,21 @@ async def update_user_tier(user_id: str, tier: str) -> None:
 
 async def store_refresh_token(user_id: str, token_hash: str, expires_at: datetime) -> None:
     pool = get_pool()
-    await pool.execute(
-        "INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)",
-        UUID(user_id), token_hash, expires_at,
-    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)",
+            UUID(user_id), token_hash, expires_at,
+        )
+        # Bug #18: tokens accumulated unboundedly per user; cap at 10, delete oldest beyond that
+        await conn.execute(
+            """
+            DELETE FROM refresh_tokens WHERE id IN (
+                SELECT id FROM refresh_tokens WHERE user_id = $1
+                ORDER BY created_at DESC OFFSET 10
+            )
+            """,
+            UUID(user_id),
+        )
 
 
 async def consume_refresh_token(token_hash: str) -> dict | None:
@@ -63,15 +74,34 @@ async def delete_user_refresh_tokens(user_id: str) -> None:
     await pool.execute("DELETE FROM refresh_tokens WHERE user_id = $1", UUID(user_id))
 
 
+async def delete_refresh_token_by_hash(token_hash: str) -> None:
+    pool = get_pool()
+    await pool.execute("DELETE FROM refresh_tokens WHERE token_hash = $1", token_hash)
+
+
 # ── Sessions ──────────────────────────────────────────────────────────────────
 
-async def create_session(user_id: str | None, device_id: str) -> str:
+async def create_session(user_id: str | None, device_id: str | None) -> str:
     pool = get_pool()
     row = await pool.fetchrow(
         "INSERT INTO sessions (user_id, device_id) VALUES ($1, $2) RETURNING id",
         UUID(user_id) if user_id else None, device_id,
     )
     return str(row["id"])
+
+
+async def get_session(session_id: str) -> dict | None:
+    pool = get_pool()
+    row = await pool.fetchrow("SELECT id, user_id FROM sessions WHERE id = $1", UUID(session_id))
+    return dict(row) if row else None
+
+
+async def update_session_language(session_id: str, language: str) -> None:
+    pool = get_pool()
+    await pool.execute(
+        "UPDATE sessions SET language = $1 WHERE id = $2",
+        language, UUID(session_id),
+    )
 
 
 async def end_session(session_id: str, session_title: str | None = None) -> None:
@@ -117,11 +147,15 @@ async def store_turn(
     return str(row["id"])
 
 
-async def update_turn_audio_seconds(turn_id: str, played_seconds: int) -> None:
+async def update_turn_audio_seconds(turn_id: str, played_seconds: int, user_id: str) -> None:
     pool = get_pool()
+    # Bug #5: no ownership check — any authenticated user could overwrite another user's turn data
     await pool.execute(
-        "UPDATE turns SET audio_played_seconds = $1 WHERE id = $2",
-        played_seconds, UUID(turn_id),
+        """
+        UPDATE turns SET audio_played_seconds = $1
+        WHERE id = $2 AND session_id IN (SELECT id FROM sessions WHERE user_id = $3)
+        """,
+        played_seconds, UUID(turn_id), UUID(user_id),
     )
 
 
@@ -149,6 +183,15 @@ async def get_active_subscription(user_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+async def get_subscription_by_order_id(order_id: str) -> dict | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT id, user_id, tier, status FROM subscriptions WHERE razorpay_order_id = $1",
+        order_id,
+    )
+    return dict(row) if row else None
+
+
 async def create_subscription_order(user_id: str, tier: str, order_id: str) -> str:
     pool = get_pool()
     row = await pool.fetchrow(
@@ -162,16 +205,22 @@ async def create_subscription_order(user_id: str, tier: str, order_id: str) -> s
     return str(row["id"])
 
 
-async def activate_subscription(payment_id: str, order_id: str, period_end: datetime) -> dict | None:
+async def activate_subscription(payment_id: str, order_id: str) -> dict | None:
     pool = get_pool()
+    # Bug #15A: no status='pending' guard — duplicate webhook kept resetting period_end
+    # Bug #15B: updated_at never set
+    # Use GREATEST to extend existing period rather than overwrite it
     row = await pool.fetchrow(
         """
         UPDATE subscriptions
-        SET status = 'active', razorpay_payment_id = $1, current_period_end = $3
-        WHERE razorpay_order_id = $2
+        SET status = 'active',
+            razorpay_payment_id = $1,
+            current_period_end = GREATEST(COALESCE(current_period_end, now()), now()) + interval '30 days',
+            updated_at = now()
+        WHERE razorpay_order_id = $2 AND status IN ('pending', 'active')
         RETURNING user_id, tier
         """,
-        payment_id, order_id, period_end,
+        payment_id, order_id,
     )
     return dict(row) if row else None
 
@@ -254,7 +303,10 @@ async def get_admin_stats() -> dict:
     )
     total_sessions = await pool.fetchval("SELECT COUNT(*) FROM sessions")
     total_turns = await pool.fetchval("SELECT COUNT(*) FROM turns")
-    avg_latency = await pool.fetchval("SELECT AVG(latency_ms) FROM turns WHERE latency_ms IS NOT NULL")
+    # Bug #45: AVG over all turns grew unbounded; restrict to last 7 days
+    avg_latency = await pool.fetchval(
+        "SELECT AVG(latency_ms) FROM turns WHERE latency_ms IS NOT NULL AND created_at > now() - interval '7 days'"
+    )
     return {
         "active_users_today": active_users,
         "total_sessions": total_sessions,

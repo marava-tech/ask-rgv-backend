@@ -25,10 +25,17 @@ class TokenResponse(BaseModel):
 
 class RefreshRequest(BaseModel):
     refresh_token: str
+    # Bug #17: optionally accept current access token so it can be blacklisted on refresh
+    access_token: str | None = None
 
 
 class AdminLoginRequest(BaseModel):
     password: str
+
+
+# Bug #22: accept refresh_token to scope logout to current device only
+class LogoutRequest(BaseModel):
+    refresh_token: str | None = None
 
 
 # ── Conversation ──────────────────────────────────────────────────────────────
@@ -41,7 +48,8 @@ class StartSessionRequest(BaseModel):
 class SessionData(BaseModel):
     id: str
     mode: str = "default"
-    language: str = "en"
+    # Bug #39: language removed — it is "en" by default but unknown until first turn;
+    # the field was misleading; clients should read it from the turn_id event instead
     started_at: str
 
 
