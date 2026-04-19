@@ -257,6 +257,58 @@ async def get_quote_of_day(language: str = "en") -> dict | None:
     return dict(row) if row else None
 
 
+async def list_quotes_for_admin(language: str | None = None, limit: int = 500) -> list[dict]:
+    pool = get_pool()
+    if language:
+        rows = await pool.fetch(
+            """
+            SELECT id, text, source, language, active, created_at
+            FROM quotes
+            WHERE language = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+            """,
+            language,
+            limit,
+        )
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT id, text, source, language, active, created_at
+            FROM quotes
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+
+async def insert_quote(text: str, source: str | None, language: str) -> dict:
+    pool = get_pool()
+    src = (source or "").strip() or None
+    row = await pool.fetchrow(
+        """
+        INSERT INTO quotes (text, source, language)
+        VALUES ($1, $2, $3)
+        RETURNING id, text, source, language, active, created_at
+        """,
+        text.strip(),
+        src,
+        language,
+    )
+    return dict(row)
+
+
+async def set_quote_active(quote_id: str, active: bool) -> None:
+    pool = get_pool()
+    await pool.execute(
+        "UPDATE quotes SET active = $1 WHERE id = $2",
+        active,
+        UUID(quote_id),
+    )
+
+
 # ── Ingestion log ─────────────────────────────────────────────────────────────
 
 async def create_ingestion_job(source_url: str, video_id: str, source_language: str) -> str:

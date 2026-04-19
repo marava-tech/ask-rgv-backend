@@ -7,6 +7,7 @@ Usage:
   python scripts/seed_existing.py \
     --dir "garbage-resources/data for RAG/yt-transcripts/" \
     --api-url http://localhost:8000 \
+    --admin-email <same as ADMIN_DASHBOARD_EMAIL on server> \
     --admin-password <password>
 
 All 46 source videos are English.
@@ -37,13 +38,17 @@ def extract_url_from_file(path: Path) -> str | None:
     return None
 
 
-def get_admin_token(api_url: str, password: str, client: httpx.Client) -> str:
-    r = client.post(f"{api_url}/admin/auth/login", json={"password": password}, timeout=10)
+def get_admin_token(api_url: str, email: str, password: str, client: httpx.Client) -> str:
+    r = client.post(
+        f"{api_url}/admin/auth/login",
+        json={"email": email, "password": password},
+        timeout=10,
+    )
     r.raise_for_status()
     return r.json()["admin_token"]
 
 
-def seed(transcript_dir: str, api_url: str, admin_password: str, dry_run: bool) -> None:
+def seed(transcript_dir: str, api_url: str, admin_email: str, admin_password: str, dry_run: bool) -> None:
     directory = Path(transcript_dir)
     if not directory.exists():
         print(f"Directory not found: {directory}")
@@ -72,7 +77,7 @@ def seed(transcript_dir: str, api_url: str, admin_password: str, dry_run: bool) 
         return
 
     with httpx.Client(timeout=30.0) as client:
-        token = get_admin_token(api_url, admin_password, client)
+        token = get_admin_token(api_url, admin_email, admin_password, client)
         headers = {"Authorization": f"Bearer {token}"}
 
         ok = 0
@@ -107,13 +112,19 @@ if __name__ == "__main__":
     parser.add_argument("--dir", required=True, help="Path to yt-transcripts/ directory")
     parser.add_argument("--api-url", default="http://localhost:8000")
     parser.add_argument("--admin-password", default="", help="Admin password (or set ADMIN_PASSWORD env)")
+    parser.add_argument(
+        "--admin-email",
+        default="",
+        help="Admin dashboard email (or set ADMIN_DASHBOARD_EMAIL env; must match backend)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print URLs without queuing")
     args = parser.parse_args()
 
     import os
     password = args.admin_password or os.getenv("ADMIN_PASSWORD", "")
+    email = args.admin_email or os.getenv("ADMIN_DASHBOARD_EMAIL", "kinneramadhu123@gmail.com")
     if not password and not args.dry_run:
         print("Error: --admin-password or ADMIN_PASSWORD env required")
         sys.exit(1)
 
-    seed(args.dir, args.api_url, password, args.dry_run)
+    seed(args.dir, args.api_url, email, password, args.dry_run)

@@ -30,6 +30,7 @@ class RefreshRequest(BaseModel):
 
 
 class AdminLoginRequest(BaseModel):
+    email: str
     password: str
 
 
@@ -113,3 +114,12 @@ class IngestBulkRequest(BaseModel):
 
 class ToggleRequest(BaseModel):
     enabled: bool
+
+
+# ── Admin quotes (quote-of-day pool) ──────────────────────────────────────────
+
+
+class QuoteCreateRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=20000)
+    source: str | None = Field(default=None, max_length=2000)
+    language: Literal["en", "te", "hi"] = "en"
