@@ -174,7 +174,11 @@ jobs:
             $COMPOSE up -d --force-recreate askrgv-bge-m3
           else
             echo "embeddings/ unchanged — skipping bge-m3 pull"
-            $COMPOSE up -d --no-recreate askrgv-bge-m3
+            if docker ps --filter "name=askrgv-bge-m3" --filter "status=running" -q | grep -q .; then
+              echo "askrgv-bge-m3 already running — no action needed"
+            else
+              $COMPOSE up -d --no-recreate askrgv-bge-m3
+            fi
           fi
 
           $COMPOSE up -d --force-recreate askrgv-backend askrgv-ingestion
