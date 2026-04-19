@@ -15,7 +15,11 @@ from core.config import settings
 bearer_scheme = HTTPBearer(auto_error=False)
 UTC = timezone.utc
 ACCESS_TOKEN_TTL = timedelta(hours=1)
-REFRESH_TOKEN_TTL = timedelta(days=30)
+# Mobile app: each new refresh token expires this many days after issue. Because the client
+# exchanges refresh on use, this behaves as a rolling window — roughly “signed out after
+# this many days without a successful refresh” (inactivity from the app’s perspective).
+REFRESH_TOKEN_TTL = timedelta(days=7)
+ADMIN_ACCESS_TOKEN_TTL = timedelta(days=3)
 
 
 async def verify_google_token(token: str) -> dict:
@@ -42,7 +46,7 @@ def create_admin_token() -> str:
         "sub": "admin",
         "role": "admin",
         "jti": str(uuid4()),
-        "exp": datetime.now(UTC) + timedelta(hours=8),
+        "exp": datetime.now(UTC) + ADMIN_ACCESS_TOKEN_TTL,
         "iat": datetime.now(UTC),
     }
     return jwt.encode(payload, settings.admin_jwt_secret, algorithm="HS256")
