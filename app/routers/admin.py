@@ -16,6 +16,16 @@ ADMIN_LOGIN_MAX_ATTEMPTS = 5
 ADMIN_LOGIN_WINDOW_SECONDS = 900  # 15 minutes
 
 
+def _normalize_validation_report(report_json):
+    if isinstance(report_json, str):
+        try:
+            parsed = json.loads(report_json)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return report_json if isinstance(report_json, dict) else {}
+
+
 @router.post("/auth/login")
 async def admin_login(request: Request, body: AdminLoginRequest):
     from services.quota import get_redis
@@ -145,7 +155,9 @@ async def validation_latest():
     )
     if not row:
         raise HTTPException(status_code=404, detail="No validation runs yet")
-    return dict(row)
+    data = dict(row)
+    data["report_json"] = _normalize_validation_report(data.get("report_json"))
+    return data
 
 
 @router.post("/validation/run", dependencies=[Depends(require_admin)], status_code=202)
@@ -200,7 +212,7 @@ async def _run_rag_validation():
     pool = get_pool()
     await pool.execute(
         "INSERT INTO validation_runs (overall_score, passed, report_json) VALUES ($1, $2, $3)",
-        overall, passed, json.dumps(topic_scores),
+        overall, passed, topic_scores,
     )
 
 
@@ -259,5 +271,5 @@ Reply as JSON only: {{"directness":X,"philosophical_accuracy":X,"tone":X,"consis
     pool = get_pool()
     await pool.execute(
         "INSERT INTO validation_runs (overall_score, passed, report_json) VALUES ($1, $2, $3)",
-        overall, passed, json.dumps(report),
+        overall, passed, report,
     )
