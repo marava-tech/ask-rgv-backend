@@ -20,7 +20,7 @@ async def upsert_chunks(
             "vector": {
                 "dense": emb["dense"],
                 "sparse": {
-                    "indices": emb["sparse"]["indices"],
+                    "indices": [int(i) for i in emb["sparse"]["indices"]],
                     "values": emb["sparse"]["values"],
                 },
             },
