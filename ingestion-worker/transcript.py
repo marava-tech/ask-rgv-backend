@@ -26,8 +26,7 @@ def ytta_transcript(video_id: str, language: str) -> str | None:
             session.cookies = jar  # type: ignore[assignment]
 
         api = YouTubeTranscriptApi(http_client=session)
-        languages = [language, "en"] if language != "en" else ["en"]
-        fetched = api.fetch(video_id, languages=languages)
+        fetched = api.fetch(video_id, languages=[language])
         return " ".join(s.text for s in fetched.snippets)
     except Exception:
         return None
@@ -68,14 +67,13 @@ def extract_video_id(url: str) -> str:
 
 def ytdlp_transcript(url: str, language: str) -> str | None:
     with tempfile.TemporaryDirectory() as tmpdir:
-        sub_langs = f"{language},en" if language != "en" else "en"
         subprocess.run(
             [
                 "yt-dlp",
                 *_ytdlp_args(),
                 "--write-subs", "--write-auto-subs",
                 "--skip-download",
-                "--sub-lang", sub_langs,
+                "--sub-lang", language,
                 "--sub-format", "vtt",
                 "--output", f"{tmpdir}/%(id)s",
                 url,
@@ -85,7 +83,9 @@ def ytdlp_transcript(url: str, language: str) -> str | None:
         vtt_files = [f for f in os.listdir(tmpdir) if f.endswith(".vtt")]
         if not vtt_files:
             return None
-        vtt_path = os.path.join(tmpdir, vtt_files[0])
+        # Prefer the file matching the requested language to avoid English fallbacks
+        lang_files = [f for f in vtt_files if f".{language}." in f]
+        vtt_path = os.path.join(tmpdir, (lang_files or vtt_files)[0])
         return _parse_vtt(vtt_path)
 
 

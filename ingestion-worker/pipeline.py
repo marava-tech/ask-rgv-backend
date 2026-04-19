@@ -32,7 +32,7 @@ async def run_pipeline(job_id: str, url: str, source_language: str, pool: asyncp
         VALUES ($1, $2, $3, $4, 'extracting_transcript', 'Checking YouTube for captions (yt-dlp)...', 10)
         ON CONFLICT (video_id) WHERE video_id IS NOT NULL DO UPDATE SET
             status = 'extracting_transcript', current_step = 'Checking YouTube for captions (yt-dlp)...',
-            progress_pct = 10, error_message = NULL
+            progress_pct = 10, error_message = NULL, source_language = EXCLUDED.source_language
         RETURNING id
         """,
         uuid.UUID(job_id), url, video_id, source_language,
