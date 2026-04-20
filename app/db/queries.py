@@ -104,6 +104,14 @@ async def update_session_language(session_id: str, language: str) -> None:
     )
 
 
+async def update_session_title(session_id: str, title: str) -> None:
+    pool = get_pool()
+    await pool.execute(
+        "UPDATE sessions SET session_title = $1 WHERE id = $2 AND session_title IS NULL",
+        title, UUID(session_id),
+    )
+
+
 async def end_session(session_id: str, session_title: str | None = None) -> None:
     pool = get_pool()
     await pool.execute(
@@ -112,15 +120,22 @@ async def end_session(session_id: str, session_title: str | None = None) -> None
     )
 
 
-async def get_user_sessions(user_id: str, limit: int = 20, offset: int = 0) -> list[dict]:
+async def get_user_sessions(
+    user_id: str,
+    limit: int = 20,
+    offset: int = 0,
+    query: str | None = None,
+) -> list[dict]:
     pool = get_pool()
     rows = await pool.fetch(
         """
-        SELECT id, session_title, turn_count, language, started_at, ended_at
-        FROM sessions WHERE user_id = $1
+        SELECT id, session_title AS title, turn_count, language, started_at, ended_at
+        FROM sessions
+        WHERE user_id = $1
+          AND ($4::text IS NULL OR $4 = '' OR COALESCE(session_title, '') ILIKE '%' || $4 || '%')
         ORDER BY started_at DESC LIMIT $2 OFFSET $3
         """,
-        UUID(user_id), limit, offset,
+        UUID(user_id), limit, offset, query,
     )
     return [dict(r) for r in rows]
 
@@ -130,7 +145,7 @@ async def get_user_sessions(user_id: str, limit: int = 20, offset: int = 0) -> l
 async def store_turn(
     session_id: str, mode: str, user_input: str, response: str,
     tokens_used: int, latency_ms: int, rag_chunks_used: int,
-) -> str:
+) -> tuple[str, int]:
     pool = get_pool()
     row = await pool.fetchrow(
         """
@@ -140,11 +155,11 @@ async def store_turn(
         """,
         UUID(session_id), mode, user_input, response, tokens_used, latency_ms, rag_chunks_used,
     )
-    await pool.execute(
-        "UPDATE sessions SET turn_count = turn_count + 1 WHERE id = $1",
+    updated = await pool.fetchrow(
+        "UPDATE sessions SET turn_count = turn_count + 1 WHERE id = $1 RETURNING turn_count",
         UUID(session_id),
     )
-    return str(row["id"])
+    return str(row["id"]), updated["turn_count"]
 
 
 async def update_turn_audio_seconds(turn_id: str, played_seconds: int, user_id: str) -> None:
@@ -251,8 +266,24 @@ async def log_crisis_event(session_id: str | None, trigger_phrase: str) -> None:
 async def get_quote_of_day(language: str = "en") -> dict | None:
     pool = get_pool()
     row = await pool.fetchrow(
-        "SELECT text, source FROM quotes WHERE active = true AND language = $1 ORDER BY random() LIMIT 1",
+        "SELECT id, text, source FROM quotes WHERE active = true AND language = $1 ORDER BY random() LIMIT 1",
         language,
+    )
+    return dict(row) if row else None
+
+
+async def get_quote_of_day_except(language: str, exclude_id: str | None) -> dict | None:
+    pool = get_pool()
+    if not exclude_id:
+        return await get_quote_of_day(language)
+    try:
+        from uuid import UUID
+        exclude_uuid = UUID(exclude_id)
+    except (ValueError, AttributeError):
+        return await get_quote_of_day(language)
+    row = await pool.fetchrow(
+        "SELECT id, text, source FROM quotes WHERE active = true AND language = $1 AND id != $2 ORDER BY random() LIMIT 1",
+        language, exclude_uuid,
     )
     return dict(row) if row else None
 

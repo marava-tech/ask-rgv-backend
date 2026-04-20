@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from core.auth import create_admin_token, require_admin
 from core.config import settings
 from db import queries
+from db.pool import get_pool
 from models.schemas import (
     AdminLoginRequest,
     IngestBulkRequest,
@@ -16,6 +17,7 @@ from models.schemas import (
     QuoteCreateRequest,
     ToggleRequest,
 )
+from services import config_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -335,3 +337,49 @@ Reply as JSON only: {{"directness":X,"philosophical_accuracy":X,"tone":X,"consis
         "INSERT INTO validation_runs (overall_score, passed, report_json) VALUES ($1, $2, $3)",
         overall, passed, report,
     )
+
+
+# ── App Config ────────────────────────────────────────────────────────────────
+
+@router.get("/config")
+async def list_config(_: dict = Depends(require_admin)):
+    config = await config_service.get_all_config()
+    pool = get_pool()
+    rows = await pool.fetch("SELECT key, value, description, updated_at FROM app_config ORDER BY key")
+    return [dict(row) for row in rows]
+
+
+@router.patch("/config/{key}")
+async def update_config(key: str, body: dict, _: dict = Depends(require_admin)):
+    value = body.get("value")
+    if value is None:
+        raise HTTPException(status_code=400, detail="value required")
+    await config_service.set_config(key, str(value))
+    return {"key": key, "value": str(value)}
+
+
+# ── Response Monitor ──────────────────────────────────────────────────────────
+
+@router.post("/monitor/run")
+async def run_monitor(_: dict = Depends(require_admin)):
+    asyncio.create_task(_run_monitor_bg())
+    return {"status": "started"}
+
+
+@router.get("/monitor/latest")
+async def get_latest_monitor(_: dict = Depends(require_admin)):
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT id, sample_size, report_json, improvement_notes, run_at FROM monitor_runs ORDER BY run_at DESC LIMIT 1"
+    )
+    if not row:
+        return {"status": "no_runs"}
+    return dict(row)
+
+
+async def _run_monitor_bg(sample_size: int = 50):
+    from services.response_monitor import run_monitor as _run
+    try:
+        await _run(sample_size)
+    except Exception:
+        pass
