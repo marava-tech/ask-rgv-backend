@@ -6,10 +6,10 @@ from core.config import settings
 _redis: aioredis.Redis | None = None
 
 TIER_LIMITS = {
-    "anonymous": 300,
-    "free": 300,
-    "fan": 3600,
-    "super_fan": -1,
+    "anonymous": 300,    # 5 credits/week
+    "free": 300,         # 5 credits/week
+    "fan": 3600,         # 60 credits/week
+    "super_fan": 15000,  # 250 credits/week
 }
 
 SECONDS_PER_CREDIT = 60
@@ -37,17 +37,23 @@ def get_redis() -> aioredis.Redis:
 
 
 def _quota_key(user_id: str | None, device_id: str | None) -> str:
-    today = date.today().isoformat()
+    today = date.today()
+    iso = today.isocalendar()
+    week_key = f"{iso.year}W{iso.week:02d}"
     if user_id:
-        return f"quota:{user_id}:{today}"
-    return f"quota:anon:{device_id}:{today}"
+        return f"quota:{user_id}:{week_key}"
+    return f"quota:anon:{device_id}:{week_key}"
 
 
-def _seconds_until_midnight_ist() -> int:
+def _seconds_until_week_end_ist() -> int:
     IST = timezone(timedelta(hours=5, minutes=30))
     now = datetime.now(IST)
-    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return int((midnight - now).total_seconds())
+    # ISO week ends Sunday; next Monday 00:00 IST is the reset point
+    days_until_monday = 7 - now.weekday()  # weekday(): Mon=0 … Sun=6
+    next_monday = (now + timedelta(days=days_until_monday)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return int((next_monday - now).total_seconds())
 
 
 async def get_quota_remaining(user_id: str | None, device_id: str | None, tier: str) -> int:
@@ -63,7 +69,7 @@ async def add_quota_usage(user_id: str | None, device_id: str | None, seconds: i
     r = get_redis()
     key = _quota_key(user_id, device_id)
     new_total = await r.incrby(key, seconds)
-    await r.expire(key, _seconds_until_midnight_ist())
+    await r.expire(key, _seconds_until_week_end_ist())
     return new_total
 
 

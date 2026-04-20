@@ -61,8 +61,12 @@ class StartSessionResponse(BaseModel):
 class TurnRequest(BaseModel):
     session_id: str
     message: str
-    mode: Literal["default", "hard_truth"] = "default"
+    mode: Literal["default", "hard_truth", "argue"] = "default"
     device_id: str | None = None
+
+
+class RenameSessionRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=100)
 
 
 class UsageRequest(BaseModel):
