@@ -45,24 +45,28 @@ def _concat_wavs(wav_chunks: list[bytes]) -> bytes:
     return buf.getvalue()
 
 
+_SEMAPHORE = asyncio.Semaphore(5)
+
+
 async def _synthesise_chunk(client: httpx.AsyncClient, text: str, voice_id: str) -> bytes:
-    response = await client.post(
-        SMALLEST_URL,
-        headers={
-            "Authorization": f"Bearer {settings.smallest_ai_api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "text": text,
-            "voice_id": voice_id,
-            "sample_rate": 24000,
-            "speed": 1.0,
-            "add_wav_header": True,
-        },
-    )
-    if response.status_code != 200:
-        raise RuntimeError(f"Smallest.ai error {response.status_code}: {response.text[:200]}")
-    return response.content
+    async with _SEMAPHORE:
+        response = await client.post(
+            SMALLEST_URL,
+            headers={
+                "Authorization": f"Bearer {settings.smallest_ai_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "text": text,
+                "voice_id": voice_id,
+                "sample_rate": 24000,
+                "speed": 1.0,
+                "add_wav_header": True,
+            },
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"Smallest.ai error {response.status_code}: {response.text[:200]}")
+        return response.content
 
 
 async def synthesise_speech(text: str, language: str) -> bytes:
