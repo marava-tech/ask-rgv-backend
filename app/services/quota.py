@@ -12,6 +12,21 @@ TIER_LIMITS = {
     "super_fan": -1,
 }
 
+SECONDS_PER_CREDIT = 60
+
+# Credits are the user-facing unit; internally we track seconds.
+def seconds_to_credits(seconds: int) -> int:
+    import math
+    if seconds < 0:
+        return -1
+    return math.ceil(seconds / SECONDS_PER_CREDIT)
+
+
+def limit_to_credits(limit_seconds: int) -> int:
+    if limit_seconds == -1:
+        return -1
+    return limit_seconds // SECONDS_PER_CREDIT
+
 
 def get_redis() -> aioredis.Redis:
     global _redis

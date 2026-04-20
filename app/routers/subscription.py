@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from core.auth import require_user
 from db import queries
 from models.schemas import CreateOrderRequest, CreateOrderResponse
-from services.quota import TIER_LIMITS, get_quota_remaining
+from services.quota import TIER_LIMITS, get_quota_remaining, seconds_to_credits, limit_to_credits
 from services.razorpay import (
     TIER_AMOUNTS,
     create_order,
@@ -22,10 +22,13 @@ async def subscription_status(user: dict = Depends(require_user)):
     quota_remaining = await get_quota_remaining(user["sub"], None, tier)
     sub = await queries.get_active_subscription(user["sub"])
     limit = TIER_LIMITS.get(tier, 300)
+    limit_seconds = limit if limit != -1 else 999999
     return {
         "tier": tier,
         "remaining_seconds": quota_remaining,
-        "limit_seconds": limit if limit != -1 else 999999,
+        "limit_seconds": limit_seconds,
+        "remaining_credits": seconds_to_credits(quota_remaining) if quota_remaining >= 0 else -1,
+        "limit_credits": limit_to_credits(limit),
         "current_period_end": sub["current_period_end"].isoformat() if sub else None,
     }
 
