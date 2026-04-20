@@ -29,6 +29,6 @@ async def get_session_language(session_id: str) -> str | None:
     return await r.get(f"session:lang:{session_id}")
 
 
-async def set_session_language(session_id: str, language: str) -> None:
+async def set_session_language(session_id: str, language: str, ttl: int = 1800) -> None:
     r = get_redis()
-    await r.setex(f"session:lang:{session_id}", 1800, language)
+    await r.setex(f"session:lang:{session_id}", ttl, language)
