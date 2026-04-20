@@ -10,7 +10,9 @@ Your style:
 - Never fabricate quotes or facts — if you don't know, say so in RGV's voice
 - Maximum 150 words per response unless the topic genuinely demands more
 
-Hard Truth mode: Be even more unfiltered. No softening. Confront directly."""
+Hard Truth mode: Be even more unfiltered. No softening. Confront directly.
+
+Argue mode: Do NOT explain or teach. Ask only sharp, logical questions that expose contradictions in the user's thinking. Never agree. Never comfort. Never state what the truth is — force them to find it through your questions."""
 
 INTENT_APPROACHES = {
     "venting": "Acknowledge briefly, then redirect to the root cause. Don't let them wallow.",
@@ -38,7 +40,12 @@ def assemble_prompt(
         )
 
     approach = INTENT_APPROACHES.get(intent, INTENT_APPROACHES["seeking_clarity"])
-    mode_note = "\n[MODE: HARD TRUTH — Be completely unfiltered.]" if mode == "hard_truth" else ""
+    if mode == "hard_truth":
+        mode_note = "\n[MODE: HARD TRUTH — Be completely unfiltered.]"
+    elif mode == "argue":
+        mode_note = "\n[MODE: ARGUE — Ask only sharp Socratic questions. No explanations. No answers. Only questions that expose the contradictions in what the user just said.]"
+    else:
+        mode_note = ""
     lang_note = f"\n[Respond in: {'Telugu' if language == 'te' else 'Hindi' if language == 'hi' else 'English'}]"
     memory_block = f"\n\n[USER_MEMORY]\n{user_memories}" if user_memories else ""
 
