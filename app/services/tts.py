@@ -23,7 +23,7 @@ async def synthesise_speech(text: str, language: str) -> bytes:
                 "voice_id": voice_id,
                 "sample_rate": 24000,
                 "speed": 1.0,
-                "add_wav_header": False,
+                "add_wav_header": True,
             },
         )
         if response.status_code != 200:
