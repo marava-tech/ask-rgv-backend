@@ -48,6 +48,14 @@ def _concat_wavs(wav_chunks: list[bytes]) -> bytes:
 _SEMAPHORE = asyncio.Semaphore(5)
 
 
+def _strip_markdown(text: str) -> str:
+    text = re.sub(r'\*{1,3}(.*?)\*{1,3}', r'\1', text)
+    text = re.sub(r'_{1,2}(.*?)_{1,2}', r'\1', text)
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'`{1,3}.*?`{1,3}', '', text, flags=re.DOTALL)
+    return text.strip()
+
+
 async def _synthesise_chunk(client: httpx.AsyncClient, text: str, voice_id: str) -> bytes:
     async with _SEMAPHORE:
         response = await client.post(
@@ -74,7 +82,7 @@ async def synthesise_speech(text: str, language: str) -> bytes:
     voice_attr = _VOICE_MAP.get(language, "smallest_ai_voice_en")
     voice_id = getattr(settings, voice_attr) or settings.smallest_ai_voice_en
 
-    chunks = _split_chunks(text)
+    chunks = _split_chunks(_strip_markdown(text))
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         wav_chunks = await asyncio.gather(
