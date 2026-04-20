@@ -64,5 +64,8 @@ async def text_to_speech(
     text = body.text
     language = body.language if body.language in ("en", "te", "hi") else "en"
 
-    audio_bytes = await synthesise_speech(text, language)
-    return Response(content=audio_bytes, media_type="audio/mpeg")
+    try:
+        audio_bytes = await synthesise_speech(text, language)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+    return Response(content=audio_bytes, media_type="audio/wav")
