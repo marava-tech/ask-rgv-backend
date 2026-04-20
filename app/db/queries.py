@@ -112,6 +112,24 @@ async def update_session_title(session_id: str, title: str) -> None:
     )
 
 
+async def delete_session(session_id: str, user_id: str) -> bool:
+    pool = get_pool()
+    result = await pool.execute(
+        "DELETE FROM sessions WHERE id = $1 AND user_id = $2",
+        UUID(session_id), UUID(user_id),
+    )
+    return result == "DELETE 1"
+
+
+async def rename_session(session_id: str, user_id: str, title: str) -> bool:
+    pool = get_pool()
+    result = await pool.execute(
+        "UPDATE sessions SET session_title = $1 WHERE id = $2 AND user_id = $3",
+        title.strip()[:100], UUID(session_id), UUID(user_id),
+    )
+    return result == "UPDATE 1"
+
+
 async def end_session(session_id: str, session_title: str | None = None) -> None:
     pool = get_pool()
     await pool.execute(

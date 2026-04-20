@@ -1,4 +1,6 @@
+import asyncio
 import json
+import logging
 import time
 from datetime import datetime, timezone
 
@@ -10,6 +12,7 @@ from db import queries
 from models.schemas import (
     EndSessionRequest,
     InterruptRequest,
+    RenameSessionRequest,
     SessionData,
     StartSessionRequest,
     StartSessionResponse,
@@ -17,7 +20,22 @@ from models.schemas import (
     UsageRequest,
 )
 from services import session as session_svc
-from services.claude import sonnet_stream
+from services.claude import haiku_call, sonnet_stream
+
+_log = logging.getLogger(__name__)
+
+
+async def _generate_title(session_id: str, user_input: str) -> None:
+    try:
+        title = await haiku_call(
+            f'Generate a concise 3-5 word title for a conversation that started with: "{user_input}". '
+            'Return ONLY the title, no quotes, no punctuation at the end.'
+        )
+        title = title.strip().strip('"').strip("'")[:80]
+        if title:
+            await queries.update_session_title(session_id, title)
+    except Exception as e:
+        _log.warning("[title] generation failed for session %s: %r", session_id, e)
 from services.crisis import detect_crisis, get_safety_response
 from services.intent import classify_intent
 from services.language import detect_language, get_session_language, set_session_language
@@ -134,7 +152,7 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
         # await it now so we can yield turn_id to the client before done
         turn_id = None
         if user_id:
-            turn_id = await queries.store_turn(
+            turn_id, turn_count = await queries.store_turn(
                 session_id=body.session_id,
                 mode=body.mode,
                 user_input=body.message,
@@ -145,6 +163,8 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
             )
             await session_svc.append_turn(body.session_id, body.message, full_response)
             yield _sse("turn_id", {"id": turn_id})
+            if turn_count == 1:
+                asyncio.create_task(_generate_title(body.session_id, body.message))
 
         new_used = await add_quota_usage(user_id, device_id, turn_seconds)
         limit = TIER_LIMITS.get(tier, 300)
@@ -188,12 +208,38 @@ async def end_session(body: EndSessionRequest, user: dict | None = Depends(get_c
 
 @router.get("/sessions")
 async def conversation_history(
-    limit: int = 20, offset: int = 0, user: dict = Depends(get_current_user)
+    limit: int = 20,
+    offset: int = 0,
+    q: str | None = None,
+    user: dict = Depends(get_current_user),
 ):
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
-    sessions = await queries.get_user_sessions(user["sub"], limit, offset)
+    sessions = await queries.get_user_sessions(user["sub"], limit, offset, q)
     return [dict(s) for s in sessions]
+
+
+@router.delete("/sessions/{session_id}", status_code=204)
+async def delete_session(session_id: str, user: dict = Depends(get_current_user)):
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+    deleted = await queries.delete_session(session_id, user["sub"])
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+
+@router.patch("/sessions/{session_id}")
+async def rename_session(
+    session_id: str,
+    body: RenameSessionRequest,
+    user: dict = Depends(get_current_user),
+):
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+    renamed = await queries.rename_session(session_id, user["sub"], body.title)
+    if not renamed:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    return {"id": session_id, "title": body.title}
 
 
 @router.get("/sessions/{session_id}/turns")
