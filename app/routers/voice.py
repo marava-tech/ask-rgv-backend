@@ -39,10 +39,6 @@ async def speech_to_text(
     content_type = audio.content_type or "audio/webm"
     result = await transcribe_audio(audio_bytes, content_type)
 
-    if not result["transcript"]:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            detail="No speech detected in audio")
-
     return result
 
 
