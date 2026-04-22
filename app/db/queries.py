@@ -96,6 +96,12 @@ async def get_session(session_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+async def get_session_language_from_db(session_id: str) -> str | None:
+    pool = get_pool()
+    row = await pool.fetchrow("SELECT language FROM sessions WHERE id = $1", UUID(session_id))
+    return row["language"] if row and row["language"] else None
+
+
 async def update_session_language(session_id: str, language: str) -> None:
     pool = get_pool()
     await pool.execute(

@@ -63,6 +63,17 @@ def _seconds_until_week_end_ist() -> int:
     return int((next_monday - now).total_seconds())
 
 
+def next_credit_refresh_utc() -> datetime:
+    """Return the next weekly credit reset as a UTC datetime."""
+    IST = timezone(timedelta(hours=5, minutes=30))
+    now = datetime.now(IST)
+    days_until_monday = 7 - now.weekday()
+    next_monday_ist = (now + timedelta(days=days_until_monday)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return next_monday_ist.astimezone(timezone.utc)
+
+
 async def get_quota_remaining(user_id: str | None, device_id: str | None, tier: str) -> int:
     limit = TIER_LIMITS.get(tier, 300)
     if limit == -1:

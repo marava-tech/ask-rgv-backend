@@ -89,15 +89,18 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
             yield _sse("quota_exhausted", {"tier": tier})
             return
 
-        # Resolve language from cache; persist to DB on first detection
+        # Resolve language: Redis cache → DB fallback → detect from message
         lang = await get_session_language(body.session_id)
         if lang is None:
-            lang = detect_language(body.message)
-            await set_session_language(body.session_id, lang)
-            # Bug #11: language only lived in Redis (30-min TTL) and could flip after expiry;
-            # persist to DB so session language survives Redis eviction
             if user_id:
-                await queries.update_session_language(body.session_id, lang)
+                lang = await queries.get_session_language_from_db(body.session_id)
+                if lang:
+                    await set_session_language(body.session_id, lang)
+            if lang is None:
+                lang = detect_language(body.message)
+                await set_session_language(body.session_id, lang)
+                if user_id:
+                    await queries.update_session_language(body.session_id, lang)
 
         is_crisis, trigger = detect_crisis(body.message)
         if is_crisis:
