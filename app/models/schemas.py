@@ -91,6 +91,7 @@ class EndSessionRequest(BaseModel):
 
 class CreateOrderRequest(BaseModel):
     tier: Literal["fan", "super_fan"]
+    is_upgrade: bool = False
 
 
 class CreateOrderResponse(BaseModel):
@@ -98,6 +99,16 @@ class CreateOrderResponse(BaseModel):
     amount: int
     currency: str = "INR"
     key_id: str
+
+
+class UpgradePriceResponse(BaseModel):
+    prorated_amount_paise: int
+    prorated_amount_rupees: int
+    remaining_days: int
+    period_end: str
+    fan_price_rupees: int = 99
+    super_fan_price_rupees: int = 299
+    discount_rupees: int
 
 
 class WebhookPayload(BaseModel):
