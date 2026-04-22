@@ -108,6 +108,7 @@ services:
       EMBEDDING_SERVICE_URL: http://bge-m3:8001
       REDIS_URL: redis://redis:6379/1
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      YOUTUBE_DATA_API_KEY: ${YOUTUBE_DATA_API_KEY:-}
     volumes:
       - /tmp/askrgv-ingestion:/tmp
     networks:
@@ -158,6 +159,7 @@ services:
       SMALLEST_AI_VOICE_EN: ${SMALLEST_AI_VOICE_EN}
       SMALLEST_AI_VOICE_TE: ${SMALLEST_AI_VOICE_TE}
       SMALLEST_AI_VOICE_HI: ${SMALLEST_AI_VOICE_HI}
+      YOUTUBE_DATA_API_KEY: ${YOUTUBE_DATA_API_KEY:-}
       FIREBASE_SERVICE_ACCOUNT_PATH: ${FIREBASE_SERVICE_ACCOUNT_PATH:-/app/firebase-service-account.json}
       APP_ENV: ${APP_ENV:-production}
       WORKERS: ${WORKERS:-4}

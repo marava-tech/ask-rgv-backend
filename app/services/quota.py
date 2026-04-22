@@ -83,7 +83,7 @@ def next_credit_refresh_utc() -> datetime:
     return next_monday_ist.astimezone(timezone.utc)
 
 
-async def _get_tier_limit_seconds(tier: str) -> int:
+async def get_tier_limit_seconds(tier: str) -> int:
     """Return weekly seconds limit for a tier, reading from app_config with fallback."""
     from services.config_service import get_config_int
     config_key = _TIER_CONFIG_KEYS.get(tier)
@@ -95,7 +95,7 @@ async def _get_tier_limit_seconds(tier: str) -> int:
 
 
 async def get_quota_remaining(user_id: str | None, device_id: str | None, tier: str) -> int:
-    limit = await _get_tier_limit_seconds(tier)
+    limit = await get_tier_limit_seconds(tier)
     if limit == -1:
         return -1
     r = get_redis()

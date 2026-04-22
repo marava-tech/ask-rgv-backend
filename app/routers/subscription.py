@@ -8,7 +8,13 @@ from core.auth import require_user
 from core.config import settings
 from db import queries
 from models.schemas import CreateOrderRequest, CreateOrderResponse, UpgradePriceResponse
-from services.quota import TIER_LIMITS, get_quota_remaining, seconds_to_credits, limit_to_credits, next_credit_refresh_utc
+from services.quota import (
+    get_quota_remaining,
+    get_tier_limit_seconds,
+    limit_to_credits,
+    next_credit_refresh_utc,
+    seconds_to_credits,
+)
 from services.razorpay import (
     TIER_AMOUNTS,
     create_order,
@@ -48,7 +54,7 @@ async def subscription_status(user: dict = Depends(require_user)):
     tier = user_data["tier"] if user_data else "free"
     quota_remaining = await get_quota_remaining(user["sub"], None, tier)
     sub = await queries.get_active_subscription(user["sub"])
-    limit = TIER_LIMITS.get(tier, 300)
+    limit = await get_tier_limit_seconds(tier)
     limit_seconds = limit if limit != -1 else 999999
     return {
         "tier": tier,
