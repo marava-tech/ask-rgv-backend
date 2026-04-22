@@ -10,3 +10,4 @@ anthropic==0.51.0
 redis[asyncio]==5.2.1
 APScheduler==3.10.4
 python-multipart==0.0.20
+pyotp==2.9.0

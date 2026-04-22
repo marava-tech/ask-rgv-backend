@@ -53,17 +53,27 @@ async def admin_login(request: Request, body: AdminLoginRequest):
             detail="Too many failed attempts — try again in 15 minutes",
         )
 
+    import pyotp
+
     want_email = settings.admin_dashboard_email.strip().lower()
     got_email = body.email.strip().lower()
-    # Always run password compare_digest so response time does not reveal email validity alone.
-    password_ok = secrets.compare_digest(body.password, settings.admin_password)
     email_ok = got_email == want_email
-    if not (email_ok and password_ok):
+
+    # TOTP path (preferred): verify 6-digit code with ±1 window tolerance
+    if settings.admin_totp_secret:
+        totp = pyotp.TOTP(settings.admin_totp_secret)
+        # valid_window=1 allows the code from the previous or next 30-second window
+        code_ok = totp.verify(body.totp_code.strip(), valid_window=1)
+    else:
+        # Legacy fallback: treat totp_code field as plain password
+        code_ok = secrets.compare_digest(body.totp_code, settings.admin_password)
+
+    if not (email_ok and code_ok):
         await r.incr(rate_key)
         await r.expire(rate_key, ADMIN_LOGIN_WINDOW_SECONDS)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
+            detail="Invalid email or TOTP code",
         )
 
     await r.delete(rate_key)
@@ -255,28 +265,44 @@ async def _run_rag_validation():
     ]
 
     scores_by_topic: dict[str, list[float]] = {}
+    chunks_by_topic: dict[str, list[dict]] = {}
+
     for topic, query in TEST_QUERIES:
         try:
             chunks = await search_chunks(query)
             if not chunks:
                 scores_by_topic[topic] = [0.0]
+                chunks_by_topic[topic] = []
                 continue
             chunk_text = chunks[0]["payload"].get("text", "")[:400]
             score_str = await haiku_call(
                 f"Query: {query}\nChunk: {chunk_text}\n\nIs this chunk relevant? Score 0.0-1.0. Reply with only a number."
             )
-            scores_by_topic[topic] = [max(0.0, min(1.0, float(score_str.strip())))]
+            relevance = max(0.0, min(1.0, float(score_str.strip())))
+            scores_by_topic[topic] = [relevance]
+            chunks_by_topic[topic] = [
+                {
+                    "text": c["payload"].get("text", "")[:300],
+                    "source_video_id": c["payload"].get("source_video_id", ""),
+                    "qdrant_score": round(c.get("score", 0.0), 4),
+                }
+                for c in chunks[:3]
+            ]
         except Exception:
             scores_by_topic[topic] = [0.5]
+            chunks_by_topic[topic] = []
 
     topic_scores = {t: sum(s) / len(s) for t, s in scores_by_topic.items()}
     overall = sum(topic_scores.values()) / len(topic_scores)
     passed = overall >= 0.75
 
+    report = dict(topic_scores)
+    report["_chunks"] = chunks_by_topic
+
     pool = get_pool()
     await pool.execute(
         "INSERT INTO validation_runs (overall_score, passed, report_json) VALUES ($1, $2, $3)",
-        overall, passed, topic_scores,
+        overall, passed, report,
     )
 
 
@@ -383,3 +409,18 @@ async def _run_monitor_bg(sample_size: int = 50):
         await _run(sample_size)
     except Exception:
         pass
+
+
+@router.get("/users", dependencies=[Depends(require_admin)])
+async def list_users(limit: int = 100, offset: int = 0):
+    users = await queries.list_admin_users(limit=limit, offset=offset)
+    return {"users": users, "limit": limit, "offset": offset}
+
+
+@router.get("/bug-reports")
+async def list_bug_reports(
+    limit: int = 50,
+    offset: int = 0,
+    _: dict = Depends(require_admin),
+):
+    return await queries.get_bug_reports(limit=limit, offset=offset)
