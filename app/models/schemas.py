@@ -97,6 +97,7 @@ class CreateOrderResponse(BaseModel):
     order_id: str
     amount: int
     currency: str = "INR"
+    key_id: str
 
 
 class WebhookPayload(BaseModel):

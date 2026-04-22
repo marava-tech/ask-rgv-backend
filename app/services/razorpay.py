@@ -4,20 +4,28 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 from core.config import settings
+from fastapi import HTTPException
 
 TIER_AMOUNTS = {"fan": 9900, "super_fan": 29900}
 RAZORPAY_API = "https://api.razorpay.com/v1"
 
 
 async def create_order(tier: str) -> dict:
+    if not settings.razorpay_key_id or not settings.razorpay_key_secret:
+        raise HTTPException(status_code=503, detail="Payment not configured — set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET")
     amount = TIER_AMOUNTS[tier]
     async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.post(
-            f"{RAZORPAY_API}/orders",
-            auth=(settings.razorpay_key_id, settings.razorpay_key_secret),
-            json={"amount": amount, "currency": "INR", "payment_capture": 1},
-        )
-        response.raise_for_status()
+        try:
+            response = await client.post(
+                f"{RAZORPAY_API}/orders",
+                auth=(settings.razorpay_key_id, settings.razorpay_key_secret),
+                json={"amount": amount, "currency": "INR", "payment_capture": 1},
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=502, detail=f"Razorpay error: {e.response.text}")
+        except httpx.RequestError:
+            raise HTTPException(status_code=502, detail="Razorpay unreachable")
     return response.json()
 
 
