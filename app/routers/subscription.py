@@ -3,6 +3,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from core.auth import require_user
+from core.config import settings
 from db import queries
 from models.schemas import CreateOrderRequest, CreateOrderResponse
 from services.quota import TIER_LIMITS, get_quota_remaining, seconds_to_credits, limit_to_credits
@@ -37,7 +38,7 @@ async def subscription_status(user: dict = Depends(require_user)):
 async def create_subscription_order(body: CreateOrderRequest, user: dict = Depends(require_user)):
     order = await create_order(body.tier)
     await queries.create_subscription_order(user["sub"], body.tier, order["id"])
-    return CreateOrderResponse(order_id=order["id"], amount=order["amount"])
+    return CreateOrderResponse(order_id=order["id"], amount=order["amount"], key_id=settings.razorpay_key_id)
 
 
 @router.post("/webhook", status_code=200)
