@@ -4,12 +4,13 @@ from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.config import settings
 from db.pool import close_pool, init_pool
-from routers import admin, auth, conversation, quotes, subscription, voice
+from routers import admin, auth, conversation, feedback, quotes, subscription, voice
 
 logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
@@ -54,6 +55,46 @@ async def _nightly_cleanup_with_lock():
     await _with_leader_lock("nightly_cleanup", _nightly_cleanup)
 
 
+async def _delete_empty_recent_sessions():
+    """Runs every hour — deletes sessions with no turns started in the last 61 minutes.
+    The extra minute is a clock-skew buffer so sessions at the top of the hour aren't missed.
+    Covers both authenticated and anonymous sessions."""
+    try:
+        from db.pool import get_pool
+        pool = get_pool()
+        result = await pool.execute(
+            """
+            DELETE FROM sessions
+            WHERE turn_count = 0
+              AND started_at BETWEEN now() - interval '61 minutes' AND now()
+            """
+        )
+        logger.info("[scheduler] empty_session_cleanup: %s", result)
+    except Exception as e:
+        logger.error("[scheduler] empty_session_cleanup error: %s", e)
+
+
+async def _delete_empty_recent_sessions_with_lock():
+    await _with_leader_lock("empty_session_cleanup", _delete_empty_recent_sessions, ttl=17900)
+
+
+async def _expire_subscriptions():
+    """Runs every hour — downgrades users whose 30-day plan period has ended.
+    Updates both the subscriptions row (status → 'expired') and users.tier
+    in a single atomic transaction."""
+    try:
+        from db import queries
+        count = await queries.expire_ended_subscriptions()
+        if count > 0:
+            logger.info("[scheduler] expire_subscriptions: downgraded %d user(s) to free", count)
+    except Exception as e:
+        logger.error("[scheduler] expire_subscriptions error: %s", e)
+
+
+async def _expire_subscriptions_with_lock():
+    await _with_leader_lock("expire_subscriptions", _expire_subscriptions, ttl=43100)
+
+
 # Bug #14: quote-of-day scheduler only printed; no FCM implementation existed.
 # Bug #28: quotes weren't grouped by user language.
 # Removed until FCM + user device tokens are implemented (Phase 8).
@@ -63,6 +104,8 @@ async def _nightly_cleanup_with_lock():
 async def lifespan(app: FastAPI):
     await init_pool()
     scheduler.add_job(_nightly_cleanup_with_lock, CronTrigger(hour=0, minute=0))
+    scheduler.add_job(_delete_empty_recent_sessions_with_lock, IntervalTrigger(hours=5))
+    scheduler.add_job(_expire_subscriptions_with_lock, IntervalTrigger(hours=12))
     scheduler.start()
     yield
     scheduler.shutdown(wait=False)
@@ -85,6 +128,7 @@ app.include_router(subscription.router)
 app.include_router(quotes.router)
 app.include_router(admin.router)
 app.include_router(voice.router)
+app.include_router(feedback.router)
 
 
 @app.get("/health")

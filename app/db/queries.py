@@ -264,6 +264,37 @@ async def activate_subscription(payment_id: str, order_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+async def expire_ended_subscriptions() -> int:
+    """Mark active subscriptions whose period has ended as 'expired' and
+    downgrade the corresponding users to 'free'.  Runs in a single transaction
+    so users and subscriptions never diverge.  Returns the number of users
+    downgraded."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            tag = await conn.execute(
+                """
+                WITH expired AS (
+                    UPDATE subscriptions
+                       SET status     = 'expired',
+                           updated_at = now()
+                     WHERE status = 'active'
+                       AND current_period_end < now()
+                    RETURNING user_id
+                )
+                UPDATE users
+                   SET tier = 'free'
+                 WHERE id IN (SELECT user_id FROM expired)
+                   AND tier IN ('fan', 'super_fan')
+                """
+            )
+    # asyncpg returns "UPDATE N" for the last statement in the CTE
+    try:
+        return int(tag.split()[-1])
+    except (AttributeError, ValueError, IndexError):
+        return 0
+
+
 # ── Style profiles ────────────────────────────────────────────────────────────
 
 async def get_style_profiles(language: str, limit: int = 20) -> list[str]:
