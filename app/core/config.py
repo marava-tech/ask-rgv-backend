@@ -20,8 +20,8 @@ class Settings(BaseSettings):
     # Only this email may obtain an admin dashboard token (POST /admin/auth/login).
     admin_dashboard_email: str = "kinneramadhu123@gmail.com"
     admin_ip_allowlist: str = ""
-    # Bug #35: default includes localhost dev origin so local dashboard works without env var
-    cors_allowed_origins: str = "https://ask-rgv-dashboard.marava.tech,http://localhost:3700,http://localhost:5173"
+    # Dev: set CORS_ALLOWED_ORIGINS=http://localhost:3700,http://localhost:5173 in local .env
+    cors_allowed_origins: str = "https://ask-rgv-dashboard.marava.tech"
 
     anthropic_api_key: str
 
