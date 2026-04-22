@@ -18,7 +18,11 @@ def _qdrant_url() -> str:
 
 
 async def hybrid_search(query_text: str) -> list[dict]:
-    embedding = await embed_query(query_text)
+    try:
+        embedding = await embed_query(query_text)
+    except Exception as e:
+        logger.exception("[rag] embedding lookup failed; query len=%d", len(query_text))
+        return []
 
     dense_payload = {
         "vector": {"name": "dense", "vector": embedding["dense"]},
@@ -39,13 +43,26 @@ async def hybrid_search(query_text: str) -> list[dict]:
         "with_payload": True,
     }
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        dense_r, sparse_r = await asyncio.gather(
-            client.post(f"{_qdrant_url()}/points/search", json=dense_payload),
-            client.post(f"{_qdrant_url()}/points/search", json=sparse_payload),
+    search_url = f"{_qdrant_url()}/points/search"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            dense_r, sparse_r = await asyncio.gather(
+                client.post(search_url, json=dense_payload),
+                client.post(search_url, json=sparse_payload),
+            )
+            dense_r.raise_for_status()
+            sparse_r.raise_for_status()
+    except httpx.RequestError as e:
+        logger.exception("[rag] qdrant request failed url=%s query len=%d error=%r", search_url, len(query_text), e)
+        return []
+    except httpx.HTTPStatusError as e:
+        logger.exception(
+            "[rag] qdrant bad response url=%s status=%s body=%r",
+            search_url,
+            e.response.status_code,
+            e.response.text[:500],
         )
-        dense_r.raise_for_status()
-        sparse_r.raise_for_status()
+        return []
 
     dense_results = dense_r.json().get("result", [])
     sparse_results = sparse_r.json().get("result", [])
