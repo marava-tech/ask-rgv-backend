@@ -131,9 +131,32 @@ app.include_router(voice.router)
 app.include_router(feedback.router)
 
 
+async def _probe_http(url: str, timeout: float = 5.0) -> dict[str, str | bool]:
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+        return {"ok": True, "url": url}
+    except httpx.RequestError as e:
+        return {
+            "ok": False,
+            "url": url,
+            "error_type": type(e).__name__,
+            "error": str(e),
+        }
+    except httpx.HTTPStatusError as e:
+        return {
+            "ok": False,
+            "url": url,
+            "error_type": type(e).__name__,
+            "status_code": str(e.response.status_code),
+            "error": e.response.text[:500],
+        }
+
+
 @app.get("/health")
 async def health():
-    checks: dict[str, str] = {}
+    checks: dict[str, object] = {}
 
     try:
         from db.pool import get_pool
@@ -154,21 +177,13 @@ async def health():
     except Exception as e:
         checks["redis"] = f"error: {e}"
 
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{settings.qdrant_url}/collections")
-            r.raise_for_status()
-        checks["qdrant"] = "ok"
-    except Exception as e:
-        checks["qdrant"] = f"error: {e}"
+    qdrant_url = f"{settings.qdrant_url}/collections"
+    embedding_url = f"{settings.embedding_service_url}/health"
+    checks["qdrant"] = await _probe_http(qdrant_url)
+    checks["embedding"] = await _probe_http(embedding_url)
 
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{settings.embedding_service_url}/health")
-            r.raise_for_status()
-        checks["embedding"] = "ok"
-    except Exception as e:
-        checks["embedding"] = f"error: {e}"
+    def _is_ok(value: object) -> bool:
+        return value == "ok" or (isinstance(value, dict) and value.get("ok") is True)
 
-    overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
+    overall = "ok" if all(_is_ok(v) for v in checks.values()) else "degraded"
     return {"status": overall, **checks}
