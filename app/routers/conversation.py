@@ -77,120 +77,124 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
         raise HTTPException(status_code=400, detail="device_id required for anonymous sessions")
 
     async def event_stream():
-        # Bug #8: tier was read from the stale JWT (up to 1h old); look up current tier from DB
-        if user_id:
-            user_data = await queries.get_user_by_id(user_id)
-            tier = user_data["tier"] if user_data else "free"
-        else:
-            tier = "anonymous"
-
-        quota_remaining = await get_quota_remaining(user_id, device_id, tier)
-        if quota_remaining == 0:
-            yield _sse("quota_exhausted", {"tier": tier})
-            return
-
-        # Resolve language: voice hint (from STT) → Redis cache → DB fallback → text detection
-        lang = await get_session_language(body.session_id)
-        if lang is None:
-            if user_id:
-                lang = await queries.get_session_language_from_db(body.session_id)
-                if lang:
-                    await set_session_language(body.session_id, lang)
-            if lang is None:
-                # For voice turns, trust STT-detected language over character-based text detection
-                if body.hint_language and body.source == "voice":
-                    lang = body.hint_language
-                else:
-                    lang = detect_language(body.message)
-                await set_session_language(body.session_id, lang)
-                if user_id:
-                    await queries.update_session_language(body.session_id, lang)
-
-        # C-3: emit language before stream so Flutter picks the correct TTS voice clone
-        yield _sse("meta", {"language": lang})
-
-        is_crisis, trigger = detect_crisis(body.message)
-        if is_crisis:
-            asyncio.create_task(
-                queries.log_crisis_event(body.session_id, trigger)
-            )
-            yield _sse("safety", {"text": get_safety_response(lang)})
-            yield _sse("done", {})
-            return
-
-        history, rag_chunks, style_anchors, intent = await asyncio.gather(
-            session_svc.get_history(body.session_id),
-            search_chunks(body.message),
-            get_style_anchors(lang),
-            classify_intent(body.message),
-        )
-
-        messages, system_blocks = assemble_prompt(
-            intent=intent,
-            history=history,
-            rag_chunks=rag_chunks,
-            style_anchors=style_anchors,
-            language=lang,
-            user_input=body.message,
-            mode=body.mode,
-        )
-
-        start_time = time.time()
-        full_response = ""
-        # Bug #12: usage_out dict collects token counts from sonnet_stream after streaming completes
-        usage_out: dict = {}
-
         try:
-            async for token in sonnet_stream(messages, system_blocks, usage_out):
-                full_response += token
-                yield _sse("token", {"text": token})
+            # Bug #8: tier was read from the stale JWT (up to 1h old); look up current tier from DB
+            if user_id:
+                user_data = await queries.get_user_by_id(user_id)
+                tier = user_data["tier"] if user_data else "free"
+            else:
+                tier = "anonymous"
+
+            quota_remaining = await get_quota_remaining(user_id, device_id, tier)
+            if quota_remaining == 0:
+                yield _sse("quota_exhausted", {"tier": tier})
+                return
+
+            # Resolve language: voice hint (from STT) → Redis cache → DB fallback → text detection
+            lang = await get_session_language(body.session_id)
+            if lang is None:
+                if user_id:
+                    lang = await queries.get_session_language_from_db(body.session_id)
+                    if lang:
+                        await set_session_language(body.session_id, lang)
+                if lang is None:
+                    # For voice turns, trust STT-detected language over character-based text detection
+                    if body.hint_language and body.source == "voice":
+                        lang = body.hint_language
+                    else:
+                        lang = detect_language(body.message)
+                    await set_session_language(body.session_id, lang)
+                    if user_id:
+                        await queries.update_session_language(body.session_id, lang)
+
+            # C-3: emit language before stream so Flutter picks the correct TTS voice clone
+            yield _sse("meta", {"language": lang})
+
+            is_crisis, trigger = detect_crisis(body.message)
+            if is_crisis:
+                asyncio.create_task(
+                    queries.log_crisis_event(body.session_id, trigger)
+                )
+                yield _sse("safety", {"text": get_safety_response(lang)})
+                yield _sse("done", {})
+                return
+
+            history, rag_chunks, style_anchors, intent = await asyncio.gather(
+                session_svc.get_history(body.session_id),
+                search_chunks(body.message),
+                get_style_anchors(lang),
+                classify_intent(body.message),
+            )
+
+            messages, system_blocks = assemble_prompt(
+                intent=intent,
+                history=history,
+                rag_chunks=rag_chunks,
+                style_anchors=style_anchors,
+                language=lang,
+                user_input=body.message,
+                mode=body.mode,
+            )
+
+            start_time = time.time()
+            full_response = ""
+            # Bug #12: usage_out dict collects token counts from sonnet_stream after streaming completes
+            usage_out: dict = {}
+
+            try:
+                async for token in sonnet_stream(messages, system_blocks, usage_out):
+                    full_response += token
+                    yield _sse("token", {"text": token})
+            except Exception as e:
+                # Bug #24: str(e) could leak API key from httpx error URL; log server-side, send generic code
+                _log.exception("[turn] stream error: %r", e)
+                if full_response and user_id:
+                    # Persist partial response so history isn't lost on stream failure
+                    await session_svc.append_turn(body.session_id, body.message, full_response)
+                yield _sse("error", {"code": "STREAM_ERROR"})
+                return
+
+            latency_ms = int((time.time() - start_time) * 1000)
+            turn_seconds = estimate_turn_duration(full_response)
+            tokens_used = usage_out.get("input_tokens", 0) + usage_out.get("output_tokens", 0)
+
+            # Bug #10: store_turn was fire-and-forget via create_task so turn_id was never returned;
+            # await it now so we can yield turn_id to the client before done
+            # C-2: append to Redis for both authed and anon users (anon needs context too)
+            await session_svc.append_turn(body.session_id, body.message, full_response)
+
+            turn_id = None
+            if user_id:
+                turn_id, turn_count = await queries.store_turn(
+                    session_id=body.session_id,
+                    mode=body.mode,
+                    user_input=body.message,
+                    response=full_response,
+                    tokens_used=tokens_used,
+                    latency_ms=latency_ms,
+                    rag_chunks_used=len(rag_chunks),
+                )
+                yield _sse("turn_id", {"id": turn_id})
+                if turn_count == 1:
+                    asyncio.create_task(_generate_title(body.session_id, body.message))
+
+            # C-1: voice turns are charged by /voice/tts (actual synthesized seconds).
+            # Only charge here for text-only turns where TTS is never called.
+            if body.source == "text":
+                new_used = await add_quota_usage(user_id, device_id, turn_seconds)
+                limit = await get_tier_limit_seconds(tier)
+                if limit != -1 and new_used >= limit:
+                    yield _sse("quota_exhausted", {"tier": tier, "upgrade_url": "/subscription"})
+
+            yield _sse("done", {
+                "latency_ms": latency_ms,
+                "rag_chunks": len(rag_chunks),
+                "turn_seconds": turn_seconds,
+            })
         except Exception as e:
-            # Bug #24: str(e) could leak API key from httpx error URL; log server-side, send generic code
-            import logging
-            logging.getLogger(__name__).error("[turn] stream error: %r", e)
-            if full_response and user_id:
-                # Persist partial response so history isn't lost on stream failure
-                await session_svc.append_turn(body.session_id, body.message, full_response)
+            _log.exception("[turn] setup error: %r", e)
             yield _sse("error", {"code": "STREAM_ERROR"})
             return
-
-        latency_ms = int((time.time() - start_time) * 1000)
-        turn_seconds = estimate_turn_duration(full_response)
-        tokens_used = usage_out.get("input_tokens", 0) + usage_out.get("output_tokens", 0)
-
-        # Bug #10: store_turn was fire-and-forget via create_task so turn_id was never returned;
-        # await it now so we can yield turn_id to the client before done
-        # C-2: append to Redis for both authed and anon users (anon needs context too)
-        await session_svc.append_turn(body.session_id, body.message, full_response)
-
-        turn_id = None
-        if user_id:
-            turn_id, turn_count = await queries.store_turn(
-                session_id=body.session_id,
-                mode=body.mode,
-                user_input=body.message,
-                response=full_response,
-                tokens_used=tokens_used,
-                latency_ms=latency_ms,
-                rag_chunks_used=len(rag_chunks),
-            )
-            yield _sse("turn_id", {"id": turn_id})
-            if turn_count == 1:
-                asyncio.create_task(_generate_title(body.session_id, body.message))
-
-        # C-1: voice turns are charged by /voice/tts (actual synthesized seconds).
-        # Only charge here for text-only turns where TTS is never called.
-        if body.source == "text":
-            new_used = await add_quota_usage(user_id, device_id, turn_seconds)
-            limit = await get_tier_limit_seconds(tier)
-            if limit != -1 and new_used >= limit:
-                yield _sse("quota_exhausted", {"tier": tier, "upgrade_url": "/subscription"})
-
-        yield _sse("done", {
-            "latency_ms": latency_ms,
-            "rag_chunks": len(rag_chunks),
-            "turn_seconds": turn_seconds,
-        })
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
