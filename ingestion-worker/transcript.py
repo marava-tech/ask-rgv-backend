@@ -279,7 +279,52 @@ def whisper_transcript(url: str, language: str, progress_cb=None) -> str:
         return _transcribe_audio_file(audio_path, language)
 
 
-def get_video_title(url: str) -> str:
+_YT_DATA_API_URL = "https://www.googleapis.com/youtube/v3"
+
+
+def yt_api_video_info(video_id: str, api_key: str) -> dict:
+    """Fetch video snippet (title, default language) + available caption track languages via Data API v3."""
+    with httpx.Client(timeout=10) as client:
+        r = client.get(
+            f"{_YT_DATA_API_URL}/videos",
+            params={"part": "snippet", "id": video_id, "key": api_key},
+        )
+        r.raise_for_status()
+        items = r.json().get("items", [])
+        if not items:
+            return {}
+        snippet = items[0].get("snippet", {})
+
+        # caption track list — tells us which languages have captions
+        cap_r = client.get(
+            f"{_YT_DATA_API_URL}/captions",
+            params={"part": "snippet", "videoId": video_id, "key": api_key},
+        )
+        caption_langs: list[str] = []
+        if cap_r.status_code == 200:
+            for item in cap_r.json().get("items", []):
+                lang = item.get("snippet", {}).get("language", "")
+                if lang:
+                    caption_langs.append(lang)
+
+        return {
+            "title": snippet.get("title", ""),
+            "default_language": snippet.get("defaultAudioLanguage") or snippet.get("defaultLanguage") or "",
+            "caption_languages": caption_langs,
+        }
+
+
+def get_video_title(url: str, youtube_api_key: str = "") -> str:
+    """Fetch video title. Uses YouTube Data API v3 first (reliable), falls back to yt-dlp."""
+    video_id = extract_video_id(url)
+    if youtube_api_key and video_id:
+        try:
+            info = yt_api_video_info(video_id, youtube_api_key)
+            if info.get("title"):
+                return info["title"]
+        except Exception:
+            pass
+
     result = subprocess.run(
         ["yt-dlp", *_ytdlp_args(), "--get-title", url],
         capture_output=True, text=True, timeout=30,

@@ -31,7 +31,7 @@ class RefreshRequest(BaseModel):
 
 class AdminLoginRequest(BaseModel):
     email: str
-    password: str
+    totp_code: str  # 6-digit TOTP from Google Authenticator
 
 
 # Bug #22: accept refresh_token to scope logout to current device only
@@ -63,6 +63,9 @@ class TurnRequest(BaseModel):
     message: str
     mode: Literal["default", "hard_truth", "argue"] = "default"
     device_id: str | None = None
+    source: Literal["text", "voice"] = "text"
+    # STT-detected language hint — takes priority over text-based detection for voice turns
+    hint_language: Literal["en", "te", "hi"] | None = None
 
 
 class RenameSessionRequest(BaseModel):

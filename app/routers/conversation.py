@@ -89,7 +89,7 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
             yield _sse("quota_exhausted", {"tier": tier})
             return
 
-        # Resolve language: Redis cache → DB fallback → detect from message
+        # Resolve language: voice hint (from STT) → Redis cache → DB fallback → text detection
         lang = await get_session_language(body.session_id)
         if lang is None:
             if user_id:
@@ -97,10 +97,17 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
                 if lang:
                     await set_session_language(body.session_id, lang)
             if lang is None:
-                lang = detect_language(body.message)
+                # For voice turns, trust STT-detected language over character-based text detection
+                if body.hint_language and body.source == "voice":
+                    lang = body.hint_language
+                else:
+                    lang = detect_language(body.message)
                 await set_session_language(body.session_id, lang)
                 if user_id:
                     await queries.update_session_language(body.session_id, lang)
+
+        # C-3: emit language before stream so Flutter picks the correct TTS voice clone
+        yield _sse("meta", {"language": lang})
 
         is_crisis, trigger = detect_crisis(body.message)
         if is_crisis:
@@ -153,6 +160,9 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
 
         # Bug #10: store_turn was fire-and-forget via create_task so turn_id was never returned;
         # await it now so we can yield turn_id to the client before done
+        # C-2: append to Redis for both authed and anon users (anon needs context too)
+        await session_svc.append_turn(body.session_id, body.message, full_response)
+
         turn_id = None
         if user_id:
             turn_id, turn_count = await queries.store_turn(
@@ -164,16 +174,17 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
                 latency_ms=latency_ms,
                 rag_chunks_used=len(rag_chunks),
             )
-            await session_svc.append_turn(body.session_id, body.message, full_response)
             yield _sse("turn_id", {"id": turn_id})
             if turn_count == 1:
                 asyncio.create_task(_generate_title(body.session_id, body.message))
 
-        new_used = await add_quota_usage(user_id, device_id, turn_seconds)
-        limit = TIER_LIMITS.get(tier, 300)
-
-        if limit != -1 and new_used >= limit:
-            yield _sse("quota_exhausted", {"tier": tier, "upgrade_url": "/subscription"})
+        # C-1: voice turns are charged by /voice/tts (actual synthesized seconds).
+        # Only charge here for text-only turns where TTS is never called.
+        if body.source == "text":
+            new_used = await add_quota_usage(user_id, device_id, turn_seconds)
+            limit = TIER_LIMITS.get(tier, 300)
+            if limit != -1 and new_used >= limit:
+                yield _sse("quota_exhausted", {"tier": tier, "upgrade_url": "/subscription"})
 
         yield _sse("done", {
             "latency_ms": latency_ms,
