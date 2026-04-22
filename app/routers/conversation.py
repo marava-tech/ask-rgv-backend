@@ -41,7 +41,7 @@ from services.intent import classify_intent
 from services.language import detect_language, get_session_language, set_session_language
 from services.prompt import assemble_prompt, estimate_turn_duration
 from services.qdrant_search import search_chunks
-from services.quota import TIER_LIMITS, add_quota_usage, get_quota_remaining
+from services.quota import add_quota_usage, get_quota_remaining, get_tier_limit_seconds
 from services.style_profiles import get_style_anchors
 
 import asyncio
@@ -182,7 +182,7 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
         # Only charge here for text-only turns where TTS is never called.
         if body.source == "text":
             new_used = await add_quota_usage(user_id, device_id, turn_seconds)
-            limit = TIER_LIMITS.get(tier, 300)
+            limit = await get_tier_limit_seconds(tier)
             if limit != -1 and new_used >= limit:
                 yield _sse("quota_exhausted", {"tier": tier, "upgrade_url": "/subscription"})
 

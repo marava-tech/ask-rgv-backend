@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from core.auth import get_current_user
 from db import queries
 from services.prompt import estimate_turn_duration
-from services.quota import TIER_LIMITS, add_quota_usage, get_quota_remaining
+from services.quota import add_quota_usage, get_quota_remaining
 from services.stt import transcribe_audio
 from services.tts import synthesise_speech
 
