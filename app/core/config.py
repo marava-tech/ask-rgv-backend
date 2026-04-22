@@ -16,10 +16,13 @@ class Settings(BaseSettings):
     google_client_id: str
     jwt_secret: str
     admin_jwt_secret: str
-    admin_password: str
+    admin_password: str = ""  # legacy fallback only — superseded by TOTP when set
+    # base32 TOTP secret for Google Authenticator (POST /admin/auth/login uses this)
+    admin_totp_secret: str = ""
     # Only this email may obtain an admin dashboard token (POST /admin/auth/login).
     admin_dashboard_email: str = "kinneramadhu123@gmail.com"
     admin_ip_allowlist: str = ""
+    youtube_data_api_key: str = ""
     # Dev: set CORS_ALLOWED_ORIGINS=http://localhost:3700,http://localhost:5173 in local .env
     cors_allowed_origins: str = "https://ask-rgv-dashboard.marava.tech"
 
@@ -58,6 +61,10 @@ class Settings(BaseSettings):
             logger.warning("[config] DEEPGRAM_API_KEY not set — STT disabled")
         if not self.smallest_ai_api_key:
             logger.warning("[config] SMALLEST_AI_API_KEY not set — TTS disabled")
+        if not self.admin_totp_secret:
+            logger.warning("[config] ADMIN_TOTP_SECRET not set — dashboard login uses password fallback")
+        if not self.youtube_data_api_key:
+            logger.warning("[config] YOUTUBE_DATA_API_KEY not set — video title fetch uses yt-dlp fallback")
         return self
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

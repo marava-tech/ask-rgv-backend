@@ -13,6 +13,7 @@ from transcript import (
     invidious_audio_whisper,
     invidious_transcript,
     whisper_transcript,
+    yt_api_video_info,
     ytta_transcript,
     ytdlp_transcript,
 )
@@ -92,6 +93,18 @@ async def run_pipeline(job_id: str, url: str, source_language: str, pool: asyncp
     prior_failed = list(row["failed_methods"] or [])
 
     try:
+        # Fetch video metadata via YouTube Data API v3 first (no IP blocking risk)
+        yt_api_key = getattr(settings, "youtube_data_api_key", "")
+        yt_info: dict = {}
+        if yt_api_key and video_id:
+            try:
+                yt_info = yt_api_video_info(video_id, yt_api_key)
+                await _update(pool, job_id,
+                               source_title=yt_info.get("title") or None,
+                               current_step="Video metadata fetched via YouTube API ✓")
+            except Exception:
+                pass
+
         await _update(pool, job_id, current_step="Trying transcript sources...")
         raw_transcript, transcript_method = await _extract_transcript(
             job_id, url, video_id, source_language, prior_failed, pool
@@ -100,7 +113,7 @@ async def run_pipeline(job_id: str, url: str, source_language: str, pool: asyncp
                       current_step=f"Transcript obtained via {transcript_method} ✓",
                       transcript_method=transcript_method)
 
-        source_title = get_video_title(url)
+        source_title = yt_info.get("title") or get_video_title(url, yt_api_key)
         await _update(pool, job_id, source_title=source_title)
 
         await _run_post_transcript(
@@ -141,7 +154,8 @@ async def run_pipeline_from_transcript(
     job_id = str(row["id"])
 
     try:
-        source_title = get_video_title(url)
+        yt_api_key = getattr(settings, "youtube_data_api_key", "")
+        source_title = get_video_title(url, yt_api_key)
         await _update(pool, job_id, source_title=source_title)
 
         await _run_post_transcript(

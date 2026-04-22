@@ -451,3 +451,75 @@ async def get_admin_stats() -> dict:
         "total_turns": total_turns,
         "avg_latency_ms": round(avg_latency) if avg_latency else None,
     }
+
+
+# ── Admin: user list ──────────────────────────────────────────────────────────
+
+async def list_admin_users(limit: int = 100, offset: int = 0) -> list[dict]:
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT
+            u.id,
+            u.email,
+            u.display_name,
+            u.tier,
+            u.created_at,
+            COUNT(DISTINCT s.id)::int               AS total_sessions,
+            COALESCE(SUM(t.tokens_used), 0)::bigint AS total_tokens,
+            MAX(s.started_at)                        AS last_active,
+            sub.current_period_end                   AS subscription_expires
+        FROM users u
+        LEFT JOIN sessions s ON s.user_id = u.id
+        LEFT JOIN turns    t ON t.session_id = s.id
+        LEFT JOIN LATERAL (
+            SELECT current_period_end
+            FROM subscriptions
+            WHERE user_id = u.id AND status = 'active' AND current_period_end > now()
+            ORDER BY current_period_end DESC
+            LIMIT 1
+        ) sub ON true
+        GROUP BY u.id, sub.current_period_end
+        ORDER BY u.created_at DESC
+        LIMIT $1 OFFSET $2
+        """,
+        limit, offset,
+    )
+    return [dict(r) for r in rows]
+
+
+# ── Bug reports ───────────────────────────────────────────────────────────────
+
+async def insert_bug_report(
+    user_id: str | None,
+    description: str,
+    screenshot_url: str | None,
+    device_info: dict | None,
+) -> None:
+    pool = get_pool()
+    import json
+    await pool.execute(
+        """
+        INSERT INTO bug_reports (user_id, description, screenshot_url, device_info, created_at)
+        VALUES ($1, $2, $3, $4, $5)
+        """,
+        user_id,
+        description,
+        screenshot_url,
+        json.dumps(device_info) if device_info else None,
+        __import__('datetime').datetime.now(__import__('datetime').timezone.utc),
+    )
+
+
+async def get_bug_reports(limit: int = 50, offset: int = 0) -> list:
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, user_id, description, screenshot_url, device_info, created_at
+        FROM bug_reports
+        ORDER BY created_at DESC
+        LIMIT $1 OFFSET $2
+        """,
+        limit, offset,
+    )
+    return [dict(r) for r in rows]

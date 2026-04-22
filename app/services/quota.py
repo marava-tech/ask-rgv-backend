@@ -5,11 +5,20 @@ from core.config import settings
 
 _redis: aioredis.Redis | None = None
 
-TIER_LIMITS = {
-    "anonymous": 300,    # 5 credits/week
-    "free": 300,         # 5 credits/week
-    "fan": 3600,         # 60 credits/week
-    "super_fan": 15000,  # 250 credits/week
+# Fallback limits (seconds/week) used only when app_config is unavailable
+_DEFAULT_TIER_LIMITS = {
+    "anonymous": 300,
+    "free": 300,
+    "fan": 3600,
+    "super_fan": -1,
+}
+
+# app_config key → tier name mapping (value stored as credits/week; -1 = unlimited)
+_TIER_CONFIG_KEYS = {
+    "anonymous": "anonymous_daily_credits",
+    "free": "free_daily_credits",
+    "fan": "fan_daily_credits",
+    "super_fan": "super_fan_daily_credits",
 }
 
 SECONDS_PER_CREDIT = 60
@@ -74,8 +83,19 @@ def next_credit_refresh_utc() -> datetime:
     return next_monday_ist.astimezone(timezone.utc)
 
 
+async def _get_tier_limit_seconds(tier: str) -> int:
+    """Return weekly seconds limit for a tier, reading from app_config with fallback."""
+    from services.config_service import get_config_int
+    config_key = _TIER_CONFIG_KEYS.get(tier)
+    if config_key:
+        credits = await get_config_int(config_key, default=-999)
+        if credits != -999:
+            return -1 if credits < 0 else credits * SECONDS_PER_CREDIT
+    return _DEFAULT_TIER_LIMITS.get(tier, 300)
+
+
 async def get_quota_remaining(user_id: str | None, device_id: str | None, tier: str) -> int:
-    limit = TIER_LIMITS.get(tier, 300)
+    limit = await _get_tier_limit_seconds(tier)
     if limit == -1:
         return -1
     r = get_redis()
