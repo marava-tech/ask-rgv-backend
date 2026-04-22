@@ -10,10 +10,9 @@ TIER_AMOUNTS = {"fan": 9900, "super_fan": 29900}
 RAZORPAY_API = "https://api.razorpay.com/v1"
 
 
-async def create_order(tier: str) -> dict:
+async def _post_razorpay_order(amount: int) -> dict:
     if not settings.razorpay_key_id or not settings.razorpay_key_secret:
         raise HTTPException(status_code=503, detail="Payment not configured — set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET")
-    amount = TIER_AMOUNTS[tier]
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             response = await client.post(
@@ -27,6 +26,14 @@ async def create_order(tier: str) -> dict:
         except httpx.RequestError:
             raise HTTPException(status_code=502, detail="Razorpay unreachable")
     return response.json()
+
+
+async def create_order(tier: str) -> dict:
+    return await _post_razorpay_order(TIER_AMOUNTS[tier])
+
+
+async def create_upgrade_order(prorated_amount_paise: int) -> dict:
+    return await _post_razorpay_order(prorated_amount_paise)
 
 
 def verify_payment_signature(order_id: str, payment_id: str, signature: str) -> bool:

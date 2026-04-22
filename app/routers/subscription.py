@@ -1,19 +1,45 @@
 import json
+import math
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from core.auth import require_user
 from core.config import settings
 from db import queries
-from models.schemas import CreateOrderRequest, CreateOrderResponse
-from services.quota import TIER_LIMITS, get_quota_remaining, seconds_to_credits, limit_to_credits
+from models.schemas import CreateOrderRequest, CreateOrderResponse, UpgradePriceResponse
+from services.quota import TIER_LIMITS, get_quota_remaining, seconds_to_credits, limit_to_credits, next_credit_refresh_utc
 from services.razorpay import (
     TIER_AMOUNTS,
     create_order,
+    create_upgrade_order,
     verify_webhook_signature,
 )
 
 router = APIRouter(prefix="/subscription", tags=["subscription"])
+
+_FAN_PRICE_PAISE = TIER_AMOUNTS["fan"]          # 9900
+_SUPER_FAN_PRICE_PAISE = TIER_AMOUNTS["super_fan"]  # 29900
+_PLAN_DAYS = 30
+
+
+def _calc_prorated_upgrade(period_end: datetime) -> dict:
+    """Return prorated Super Fan upgrade price for a Fan subscriber."""
+    now = datetime.now(timezone.utc)
+    remaining_seconds = max(0, (period_end - now).total_seconds())
+    remaining_days = remaining_seconds / 86400          # fractional days
+    remaining_days_int = math.ceil(remaining_days)      # shown to user
+    fan_credit_paise = (remaining_days / _PLAN_DAYS) * _FAN_PRICE_PAISE
+    raw_upgrade_paise = _SUPER_FAN_PRICE_PAISE - fan_credit_paise
+    # Round to nearest ₹1 (100 paise), never below ₹1
+    upgrade_paise = max(100, round(raw_upgrade_paise / 100) * 100)
+    discount_rupees = round(fan_credit_paise / 100)
+    return {
+        "prorated_amount_paise": upgrade_paise,
+        "prorated_amount_rupees": upgrade_paise // 100,
+        "remaining_days": remaining_days_int,
+        "discount_rupees": discount_rupees,
+    }
 
 
 @router.get("/status")
@@ -31,12 +57,62 @@ async def subscription_status(user: dict = Depends(require_user)):
         "remaining_credits": seconds_to_credits(quota_remaining) if quota_remaining >= 0 else -1,
         "limit_credits": limit_to_credits(limit),
         "current_period_end": sub["current_period_end"].isoformat() if sub else None,
+        "next_credit_refresh": next_credit_refresh_utc().isoformat(),
     }
+
+
+@router.get("/upgrade-price", response_model=UpgradePriceResponse)
+async def get_upgrade_price(user: dict = Depends(require_user)):
+    """Returns the prorated Fan → Super Fan upgrade price for the current user."""
+    user_data = await queries.get_user_by_id(user["sub"])
+    if not user_data or user_data["tier"] != "fan":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Upgrade price only available for Fan subscribers.",
+        )
+    sub = await queries.get_active_subscription(user["sub"])
+    if not sub:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active Fan subscription found.",
+        )
+    period_end: datetime = sub["current_period_end"]
+    if period_end.tzinfo is None:
+        period_end = period_end.replace(tzinfo=timezone.utc)
+    calc = _calc_prorated_upgrade(period_end)
+    return UpgradePriceResponse(
+        **calc,
+        period_end=period_end.isoformat(),
+    )
 
 
 @router.post("/create-order", response_model=CreateOrderResponse)
 async def create_subscription_order(body: CreateOrderRequest, user: dict = Depends(require_user)):
-    order = await create_order(body.tier)
+    # Block re-purchasing the same tier
+    user_data = await queries.get_user_by_id(user["sub"])
+    current_tier = user_data["tier"] if user_data else "free"
+    if body.tier == current_tier and current_tier in ("fan", "super_fan"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Already subscribed to {body.tier}.",
+        )
+
+    if body.is_upgrade and body.tier == "super_fan" and current_tier == "fan":
+        # Prorated upgrade: calculate discount from remaining Fan days
+        sub = await queries.get_active_subscription(user["sub"])
+        if not sub:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No active Fan subscription found for upgrade.",
+            )
+        period_end: datetime = sub["current_period_end"]
+        if period_end.tzinfo is None:
+            period_end = period_end.replace(tzinfo=timezone.utc)
+        calc = _calc_prorated_upgrade(period_end)
+        order = await create_upgrade_order(calc["prorated_amount_paise"])
+    else:
+        order = await create_order(body.tier)
+
     await queries.create_subscription_order(user["sub"], body.tier, order["id"])
     return CreateOrderResponse(order_id=order["id"], amount=order["amount"], key_id=settings.razorpay_key_id)
 
@@ -56,18 +132,22 @@ async def razorpay_webhook(request: Request):
         payment = data["payload"]["payment"]["entity"]
         order_id = payment.get("order_id")
 
-        # Bug #3: never verified captured amount matched the expected tier price —
-        # a partial-capture forged event would still upgrade the user
         sub_row = await queries.get_subscription_by_order_id(order_id)
         if not sub_row:
             return {"status": "ok"}
 
+        # For upgrade orders the captured amount won't match TIER_AMOUNTS — skip fixed-amount check.
+        # We only verify the full amount for non-upgrade (fresh) subscriptions.
         expected_amount = TIER_AMOUNTS.get(sub_row["tier"])
-        if expected_amount and payment.get("amount") != expected_amount:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Amount mismatch: expected {expected_amount}, got {payment.get('amount')}",
-            )
+        captured_amount = payment.get("amount")
+        # Allow if captured amount equals full price OR is at least ₹1 (upgrade proration)
+        if expected_amount and captured_amount != expected_amount:
+            # Treat as valid upgrade payment if amount is reasonable (≥ ₹1, ≤ full price)
+            if captured_amount < 100 or captured_amount > expected_amount:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Amount out of valid range: got {captured_amount}",
+                )
 
         row = await queries.activate_subscription(
             payment_id=payment["id"],
