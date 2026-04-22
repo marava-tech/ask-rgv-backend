@@ -13,7 +13,6 @@ _DEFAULT_TIER_LIMITS = {
     "super_fan": -1,
 }
 
-# app_config key → tier name mapping (value stored as credits/week; -1 = unlimited)
 _TIER_CONFIG_KEYS = {
     "anonymous": "anonymous_daily_credits",
     "free": "free_daily_credits",
