@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     embedding_service_url: str
     redis_url: str
     anthropic_api_key: str
+    youtube_data_api_key: str = ""
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

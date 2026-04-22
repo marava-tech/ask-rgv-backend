@@ -1,14 +1,22 @@
 import io
+import logging
 import re
 import wave
 import asyncio
 import httpx
 from core.config import settings
 
+_log = logging.getLogger(__name__)
+
 SMALLEST_URL = "https://waves-api.smallest.ai/api/v1/lightning/get_speech"
 _TTS_CHAR_LIMIT = 250
 
-_VOICE_MAP = {"te": "smallest_ai_voice_te", "hi": "smallest_ai_voice_hi"}
+# Maps session language code → settings attribute name for that language's voice clone
+_VOICE_MAP = {
+    "en": "smallest_ai_voice_en",
+    "te": "smallest_ai_voice_te",
+    "hi": "smallest_ai_voice_hi",
+}
 
 
 def _split_chunks(text: str, limit: int = _TTS_CHAR_LIMIT) -> list[str]:
@@ -79,8 +87,12 @@ async def _synthesise_chunk(client: httpx.AsyncClient, text: str, voice_id: str)
 
 async def synthesise_speech(text: str, language: str) -> bytes:
     """Split text into ≤250-char chunks, call Smallest.ai in parallel, return merged WAV."""
-    voice_attr = _VOICE_MAP.get(language, "smallest_ai_voice_en")
-    voice_id = getattr(settings, voice_attr) or settings.smallest_ai_voice_en
+    voice_attr = _VOICE_MAP.get(language)
+    if voice_attr is None:
+        raise RuntimeError(f"No voice mapping for language '{language}'")
+    voice_id = getattr(settings, voice_attr, None)
+    if not voice_id:
+        raise RuntimeError(f"Voice ID for language '{language}' is not configured (settings.{voice_attr} is empty)")
 
     chunks = _split_chunks(_strip_markdown(text))
 
