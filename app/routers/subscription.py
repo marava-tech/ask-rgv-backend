@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from core.auth import require_user
+from core.auth import get_current_user, require_user
 from core.config import settings
 from db import queries
 from models.schemas import CreateOrderRequest, CreateOrderResponse, UpgradePriceResponse
@@ -49,7 +49,25 @@ def _calc_prorated_upgrade(period_end: datetime) -> dict:
 
 
 @router.get("/status")
-async def subscription_status(user: dict = Depends(require_user)):
+async def subscription_status(
+    device_id: str | None = None,
+    user: dict | None = Depends(get_current_user),
+):
+    if user is None:
+        if not device_id:
+            raise HTTPException(status_code=400, detail="device_id required for anonymous users")
+        tier = "anonymous"
+        quota_remaining = await get_quota_remaining(None, device_id, tier)
+        limit = await get_tier_limit_seconds(tier)
+        return {
+            "tier": tier,
+            "remaining_seconds": quota_remaining,
+            "limit_seconds": limit,
+            "remaining_credits": seconds_to_credits(quota_remaining),
+            "limit_credits": limit_to_credits(limit),
+            "current_period_end": None,
+            "next_credit_refresh": next_credit_refresh_utc().isoformat(),
+        }
     user_data = await queries.get_user_by_id(user["sub"])
     tier = user_data["tier"] if user_data else "free"
     quota_remaining = await get_quota_remaining(user["sub"], None, tier)
