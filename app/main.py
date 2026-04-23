@@ -103,6 +103,11 @@ async def _expire_subscriptions_with_lock():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_pool()
+
+    from db.migrations import run_pending
+    from db.pool import get_pool
+    await run_pending(get_pool())
+
     scheduler.add_job(_nightly_cleanup_with_lock, CronTrigger(hour=0, minute=0))
     scheduler.add_job(_delete_empty_recent_sessions_with_lock, IntervalTrigger(hours=5))
     scheduler.add_job(_expire_subscriptions_with_lock, IntervalTrigger(hours=12))

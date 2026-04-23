@@ -27,7 +27,10 @@ async def upsert_user(google_id: str, email: str, display_name: str, avatar_url:
 
 async def get_user_by_id(user_id: str) -> dict | None:
     pool = get_pool()
-    row = await pool.fetchrow("SELECT * FROM users WHERE id = $1", UUID(user_id))
+    row = await pool.fetchrow(
+        "SELECT id, google_id, email, display_name, avatar_url, tier, created_at FROM users WHERE id = $1",
+        UUID(user_id),
+    )
     return dict(row) if row else None
 
 
@@ -201,7 +204,11 @@ async def update_turn_audio_seconds(turn_id: str, played_seconds: int, user_id: 
 async def get_session_turns(session_id: str) -> list[dict]:
     pool = get_pool()
     rows = await pool.fetch(
-        "SELECT * FROM turns WHERE session_id = $1 ORDER BY created_at ASC",
+        """
+        SELECT id, session_id, mode, user_input, response, tokens_used, latency_ms,
+               rag_chunks_used, audio_played_seconds, created_at
+        FROM turns WHERE session_id = $1 ORDER BY created_at ASC
+        """,
         UUID(session_id),
     )
     return [dict(r) for r in rows]
@@ -213,7 +220,9 @@ async def get_active_subscription(user_id: str) -> dict | None:
     pool = get_pool()
     row = await pool.fetchrow(
         """
-        SELECT * FROM subscriptions
+        SELECT id, user_id, tier, status, razorpay_order_id, razorpay_payment_id,
+               current_period_end, created_at, updated_at
+        FROM subscriptions
         WHERE user_id = $1 AND status = 'active' AND current_period_end > now()
         ORDER BY created_at DESC LIMIT 1
         """,

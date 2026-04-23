@@ -141,13 +141,27 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
             # Bug #12: usage_out dict collects token counts from sonnet_stream after streaming completes
             usage_out: dict = {}
 
-            try:
-                async for token in sonnet_stream(messages, system_blocks, usage_out):
-                    full_response += token
-                    yield _sse("token", {"text": token})
-            except Exception as e:
-                # Bug #24: str(e) could leak API key from httpx error URL; log server-side, send generic code
-                _log.exception("[turn] stream error: %r", e)
+            stream_error: Exception | None = None
+            for attempt in range(2):
+                full_response = ""
+                usage_out = {}
+                try:
+                    async for token in sonnet_stream(messages, system_blocks, usage_out):
+                        full_response += token
+                        yield _sse("token", {"text": token})
+                    stream_error = None
+                    break
+                except Exception as e:
+                    stream_error = e
+                    if full_response:
+                        # Tokens already sent — can't retry without duplicating output
+                        break
+                    _log.warning("[turn] stream attempt %d failed: %r — retrying", attempt + 1, e)
+                    await asyncio.sleep(1.5)
+
+            if stream_error:
+                # Bug #24: str(e) could leak API key; log server-side only
+                _log.exception("[turn] stream error after retries: %r", stream_error)
                 if full_response and user_id:
                     # Persist partial response so history isn't lost on stream failure
                     await session_svc.append_turn(body.session_id, body.message, full_response)
@@ -176,13 +190,16 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
                 )
                 yield _sse("turn_id", {"id": turn_id})
                 if turn_count == 1:
-                    asyncio.create_task(_generate_title(body.session_id, body.message))
+                    task = asyncio.create_task(_generate_title(body.session_id, body.message))
+                    task.add_done_callback(
+                        lambda t: t.exception() if not t.cancelled() and not t.exception() is None else None
+                    )
 
             # C-1: voice turns are charged by /voice/tts (actual synthesized seconds).
             # Only charge here for text-only turns where TTS is never called.
             if body.source == "text":
-                new_used = await add_quota_usage(user_id, device_id, turn_seconds)
                 limit = await get_tier_limit_seconds(tier)
+                new_used = await add_quota_usage(user_id, device_id, turn_seconds, limit)
                 if limit != -1 and new_used >= limit:
                     yield _sse("quota_exhausted", {"tier": tier, "upgrade_url": "/subscription"})
 
@@ -205,7 +222,13 @@ async def record_usage(body: UsageRequest, user: dict | None = Depends(get_curre
         # Bug #5: update was unconstrained — pass user_id so only the turn's owner can update it
         await queries.update_turn_audio_seconds(body.turn_id, body.played_seconds, user["sub"])
     user_id = user["sub"] if user else None
-    await add_quota_usage(user_id, body.device_id, body.played_seconds)
+    if user_id:
+        user_data = await queries.get_user_by_id(user_id)
+        tier = user_data["tier"] if user_data else "free"
+    else:
+        tier = "anonymous"
+    limit = await get_tier_limit_seconds(tier)
+    await add_quota_usage(user_id, body.device_id, body.played_seconds, limit)
 
 
 @router.post("/interrupt", status_code=204)
@@ -214,7 +237,13 @@ async def interrupt_turn(body: InterruptRequest, user: dict | None = Depends(get
         # Bug #5: same ownership constraint applied here
         await queries.update_turn_audio_seconds(body.active_turn_id, body.played_seconds, user["sub"])
     user_id = user["sub"] if user else None
-    await add_quota_usage(user_id, body.device_id, body.played_seconds)
+    if user_id:
+        user_data = await queries.get_user_by_id(user_id)
+        tier = user_data["tier"] if user_data else "free"
+    else:
+        tier = "anonymous"
+    limit = await get_tier_limit_seconds(tier)
+    await add_quota_usage(user_id, body.device_id, body.played_seconds, limit)
 
 
 @router.post("/end", status_code=204)
@@ -264,9 +293,8 @@ async def rename_session(
 async def get_session_detail(session_id: str, user: dict = Depends(get_current_user)):
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
-    # Bug #4: no ownership check — any user could read any other user's session turns
     session = await queries.get_session(session_id)
     if not session or (session["user_id"] and str(session["user_id"]) != user["sub"]):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
     turns = await queries.get_session_turns(session_id)
     return [dict(t) for t in turns]

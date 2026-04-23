@@ -1,3 +1,6 @@
+import io
+import wave
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -16,6 +19,15 @@ ALLOWED_AUDIO_TYPES = {
     "audio/wav", "audio/x-wav", "audio/flac", "audio/aac",
 }
 MAX_AUDIO_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def _wav_duration_seconds(wav_bytes: bytes, fallback_text: str = "") -> int:
+    """Compute actual synthesised duration from WAV bytes (B-10). Falls back to word-count estimate."""
+    try:
+        with wave.open(io.BytesIO(wav_bytes)) as w:
+            return max(1, round(w.getnframes() / w.getframerate()))
+    except Exception:
+        return estimate_turn_duration(fallback_text)
 
 
 class TTSRequest(BaseModel):
@@ -58,6 +70,10 @@ async def speech_to_text(
     content_type = audio.content_type or "audio/webm"
     result = await transcribe_audio(audio_bytes, content_type)
 
+    # B-09: empty transcripts produce confusing empty turns — reject with 422 so Flutter shows a retry prompt
+    if not result["transcript"]:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Couldn't catch that — please try again")
+
     return result
 
 
@@ -91,7 +107,8 @@ async def text_to_speech(
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
-    tts_seconds = estimate_turn_duration(text)
+    # B-10: charge actual synthesised duration rather than word-count estimate
+    tts_seconds = _wav_duration_seconds(audio_bytes, fallback_text=text)
     await add_quota_usage(user_id, dev_id, tts_seconds)
 
     return Response(content=audio_bytes, media_type="audio/wav")
