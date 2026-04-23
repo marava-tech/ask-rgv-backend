@@ -53,20 +53,30 @@ def assemble_prompt(
     if style_anchors:
         static_system += f"\n\n{style_anchors}"
 
-    system_blocks = [
+    dynamic_text = (
+        f"[APPROACH FOR THIS TURN: {approach}]{mode_note}{lang_note}{memory_block}"
+    )
+
+    system_blocks: list[dict] = [
         {
             "type": "text",
             "text": static_system,
             "cache_control": {"type": "ephemeral"},
         },
-        {
-            "type": "text",
-            "text": (
-                f"[APPROACH FOR THIS TURN: {approach}]{mode_note}{lang_note}"
-                f"{rag_text}{memory_block}"
-            ),
-        },
     ]
+
+    if rag_text:
+        # BO-01: cache the RAG block separately — cache hits when the same chunks recur
+        system_blocks.append({
+            "type": "text",
+            "text": rag_text,
+            "cache_control": {"type": "ephemeral"},
+        })
+
+    system_blocks.append({
+        "type": "text",
+        "text": dynamic_text,
+    })
 
     messages = history[-(MAX_HISTORY_TURNS * 2):] + [{"role": "user", "content": user_input}]
 
