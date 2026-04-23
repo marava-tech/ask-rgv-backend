@@ -19,19 +19,20 @@ async def haiku_call(prompt: str, system: str = "") -> str:
         "messages": [{"role": "user", "content": prompt}],
     }
     if system:
-        kwargs["system"] = system
+        # B-14: use blocks format so the static system prompt can be prompt-cached
+        kwargs["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
     response = await client.messages.create(**kwargs)
     # Bug #37: non-text blocks (tool_use, thinking) would raise AttributeError on .text
     text_blocks = [b for b in response.content if b.type == "text"]
     return text_blocks[0].text if text_blocks else ""
 
 
-async def sonnet_stream(messages: list[dict], system_blocks: list[dict], usage_out: dict | None = None):
+async def sonnet_stream(messages: list[dict], system_blocks: list[dict], usage_out: dict | None = None, max_tokens: int = 4096):
     """Streams tokens; optionally writes final usage to usage_out dict (Bug #12)."""
     client = get_client()
     async with client.messages.stream(
         model="claude-sonnet-4-6",
-        max_tokens=2048,
+        max_tokens=max_tokens,
         system=system_blocks,
         messages=messages,
     ) as stream:

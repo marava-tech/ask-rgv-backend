@@ -1,3 +1,4 @@
+import time
 from datetime import date, datetime, timezone, timedelta
 
 import redis.asyncio as aioredis
@@ -14,13 +15,36 @@ _DEFAULT_TIER_LIMITS = {
 }
 
 _TIER_CONFIG_KEYS = {
-    "anonymous": "anonymous_daily_credits",
-    "free": "free_daily_credits",
-    "fan": "fan_daily_credits",
-    "super_fan": "super_fan_daily_credits",
+    "anonymous": "anonymous_weekly_credits",
+    "free": "free_weekly_credits",
+    "fan": "fan_weekly_credits",
+    "super_fan": "super_fan_weekly_credits",
 }
 
 SECONDS_PER_CREDIT = 60
+
+# B-12: module-level cache so get_tier_limit_seconds() doesn't round-trip Redis per request
+_tier_limit_cache: dict[str, tuple[int, float]] = {}
+_TIER_LIMIT_CACHE_TTL = 60.0
+
+# B-03/B-06/BO-05: atomic capped INCRBY + conditional EXPIRE in one Redis round-trip.
+# ARGV: [to_add, limit (-1=unlimited), ttl_seconds]
+_QUOTA_INCRBY_LUA = """
+local key = KEYS[1]
+local to_add = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+local exists = redis.call("EXISTS", key)
+local current = tonumber(redis.call("GET", key) or "0")
+local add = to_add
+if limit >= 0 then
+  if current >= limit then return current end
+  if (current + to_add) > limit then add = limit - current end
+end
+local new_val = redis.call("INCRBY", key, add)
+if exists == 0 then redis.call("EXPIRE", key, ttl) end
+return new_val
+"""
 
 # Credits are the user-facing unit; internally we track seconds.
 def seconds_to_credits(seconds: int) -> int:
@@ -83,14 +107,22 @@ def next_credit_refresh_utc() -> datetime:
 
 
 async def get_tier_limit_seconds(tier: str) -> int:
-    """Return weekly seconds limit for a tier, reading from app_config with fallback."""
+    """Return weekly seconds limit for a tier, reading from app_config with 60s in-memory cache."""
+    now = time.monotonic()
+    cached = _tier_limit_cache.get(tier)
+    if cached and (now - cached[1]) < _TIER_LIMIT_CACHE_TTL:
+        return cached[0]
+
     from services.config_service import get_config_int
     config_key = _TIER_CONFIG_KEYS.get(tier)
+    result = _DEFAULT_TIER_LIMITS.get(tier, 300)
     if config_key:
         credits = await get_config_int(config_key, default=-999)
         if credits != -999:
-            return -1 if credits < 0 else credits * SECONDS_PER_CREDIT
-    return _DEFAULT_TIER_LIMITS.get(tier, 300)
+            result = -1 if credits < 0 else credits * SECONDS_PER_CREDIT
+
+    _tier_limit_cache[tier] = (result, now)
+    return result
 
 
 async def get_quota_remaining(user_id: str | None, device_id: str | None, tier: str) -> int:
@@ -102,12 +134,21 @@ async def get_quota_remaining(user_id: str | None, device_id: str | None, tier: 
     return max(0, limit - used)
 
 
-async def add_quota_usage(user_id: str | None, device_id: str | None, seconds: int) -> int:
+async def add_quota_usage(
+    user_id: str | None, device_id: str | None, seconds: int, limit: int = -1
+) -> int:
+    """Add usage seconds atomically, capped at limit (-1 = unlimited). Returns new total used."""
     r = get_redis()
     key = _quota_key(user_id, device_id)
-    new_total = await r.incrby(key, seconds)
-    await r.expire(key, _seconds_until_week_end_ist())
-    return new_total
+    ttl = _seconds_until_week_end_ist()
+    new_total = await r.eval(_QUOTA_INCRBY_LUA, 1, key, seconds, limit, ttl)
+    return int(new_total)
+
+
+async def delete_quota_key(user_id: str) -> None:
+    """Delete the current week's quota key for a user (used by admin reset-quota)."""
+    r = get_redis()
+    await r.delete(_quota_key(user_id, None))
 
 
 async def blacklist_jwt(jti: str, ttl_seconds: int) -> None:
