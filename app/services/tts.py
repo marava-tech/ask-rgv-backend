@@ -21,7 +21,8 @@ _VOICE_MAP = {
 
 def _split_chunks(text: str, limit: int = _TTS_CHAR_LIMIT) -> list[str]:
     """Split text into sentence-boundary chunks each within limit chars."""
-    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    # B-08: include Devanagari (।॥) and Telugu-script dandas for proper sentence splitting
+    sentences = re.split(r'(?<=[.!?।॥])\s+', text.strip())
     chunks, current = [], ""
     for sentence in sentences:
         # Single sentence too long — hard-split at word boundary

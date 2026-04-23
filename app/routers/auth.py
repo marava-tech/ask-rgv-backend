@@ -57,7 +57,11 @@ async def refresh(body: RefreshRequest):
     hashed = hash_token(body.refresh_token)
     row = await queries.consume_refresh_token(hashed)
     if not row:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired refresh token")
+        # B-11: distinguish expired tokens so Flutter can show a user-friendly "please sign in again" message
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": "refresh_expired", "message": "Your session has expired — please sign in again"},
+        )
 
     user_id = str(row["user_id"])
     user = await queries.get_user_by_id(user_id)

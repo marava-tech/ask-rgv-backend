@@ -369,10 +369,7 @@ Reply as JSON only: {{"directness":X,"philosophical_accuracy":X,"tone":X,"consis
 
 @router.get("/config")
 async def list_config(_: dict = Depends(require_admin)):
-    config = await config_service.get_all_config()
-    pool = get_pool()
-    rows = await pool.fetch("SELECT key, value, description, updated_at FROM app_config ORDER BY key")
-    return [dict(row) for row in rows]
+    return await config_service.get_all_config_rows()
 
 
 @router.patch("/config/{key}")
@@ -415,6 +412,17 @@ async def _run_monitor_bg(sample_size: int = 50):
 async def list_users(limit: int = 100, offset: int = 0):
     users = await queries.list_admin_users(limit=limit, offset=offset)
     return {"users": users, "limit": limit, "offset": offset}
+
+
+@router.post("/users/{user_id}/reset-quota", dependencies=[Depends(require_admin)])
+async def reset_user_quota(user_id: str):
+    """Delete the current week's quota key for a user so their credits reset immediately."""
+    from services.quota import delete_quota_key
+    user = await queries.get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    await delete_quota_key(user_id)
+    return {"status": "ok", "user_id": user_id}
 
 
 @router.get("/bug-reports")

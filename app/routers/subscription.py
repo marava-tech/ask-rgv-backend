@@ -65,6 +65,7 @@ async def subscription_status(
             "limit_seconds": limit,
             "remaining_credits": seconds_to_credits(quota_remaining),
             "limit_credits": limit_to_credits(limit),
+            "exhausted": quota_remaining == 0,
             "current_period_end": None,
             "next_credit_refresh": next_credit_refresh_utc().isoformat(),
         }
@@ -80,6 +81,7 @@ async def subscription_status(
         "limit_seconds": limit_seconds,
         "remaining_credits": seconds_to_credits(quota_remaining) if quota_remaining >= 0 else -1,
         "limit_credits": limit_to_credits(limit),
+        "exhausted": quota_remaining == 0,
         "current_period_end": sub["current_period_end"].isoformat() if sub else None,
         "next_credit_refresh": next_credit_refresh_utc().isoformat(),
     }
