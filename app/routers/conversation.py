@@ -1,7 +1,10 @@
 import asyncio
+import base64
 import json
 import logging
+import re
 import time
+import uuid as _uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -21,8 +24,54 @@ from models.schemas import (
 )
 from services import session as session_svc
 from services.claude import haiku_call, sonnet_stream
+from services.crisis import detect_crisis, get_safety_response
+from services.intent import classify_intent
+from services.language import detect_language, get_session_language, set_session_language
+from services.prompt import assemble_prompt, estimate_turn_duration
+from services.qdrant_search import search_chunks
+from services.quota import add_quota_usage, get_quota_remaining, get_tier_limit_seconds
+from services.style_profiles import get_style_anchors
+from services.metrics import log_turn
+from services.tts import synthesise_sentence
 
 _log = logging.getLogger(__name__)
+
+# Sentence boundary: split after [.!?।॥] followed by whitespace.
+# Lookbehind keeps the terminator with the preceding sentence.
+_SENT_RE = re.compile(r'(?<=[.!?।॥])\s')
+
+
+def _pop_sentences(buf: str) -> tuple[list[str], str]:
+    """Split buf on sentence boundaries; return (complete sentences, remaining tail)."""
+    parts = _SENT_RE.split(buf)
+    if len(parts) <= 1:
+        return [], buf
+    return [p.strip() for p in parts[:-1] if p.strip()], parts[-1]
+
+
+async def _tts_bg(seq: int, text: str, lang: str, results: dict[int, bytes]) -> None:
+    try:
+        wav = await synthesise_sentence(text, lang)
+        results[seq] = wav
+    except Exception as e:
+        _log.warning("[tts_bg] seq=%d failed: %r", seq, e)
+        results[seq] = b""
+
+
+def _flush_audio(results: dict[int, bytes], next_seq: int) -> tuple[list[tuple[int, bytes]], int]:
+    """Drain audio_results in monotonic order, returning ready (seq, wav) pairs."""
+    ready: list[tuple[int, bytes]] = []
+    while next_seq in results:
+        ready.append((next_seq, results.pop(next_seq)))
+        next_seq += 1
+    return ready, next_seq
+
+
+router = APIRouter(prefix="/conversation", tags=["conversation"])
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 async def _generate_title(session_id: str, user_input: str) -> None:
@@ -36,33 +85,15 @@ async def _generate_title(session_id: str, user_input: str) -> None:
             await queries.update_session_title(session_id, title)
     except Exception as e:
         _log.warning("[title] generation failed for session %s: %r", session_id, e)
-from services.crisis import detect_crisis, get_safety_response
-from services.intent import classify_intent
-from services.language import detect_language, get_session_language, set_session_language
-from services.prompt import assemble_prompt, estimate_turn_duration
-from services.qdrant_search import search_chunks
-from services.quota import add_quota_usage, get_quota_remaining, get_tier_limit_seconds
-from services.style_profiles import get_style_anchors
-
-import asyncio
-
-router = APIRouter(prefix="/conversation", tags=["conversation"])
-
-
-def _sse(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 @router.post("/start", response_model=StartSessionResponse)
 async def start_session(body: StartSessionRequest, user: dict | None = Depends(get_current_user)):
     user_id = user["sub"] if user else None
-    # Bug #9: anonymous sessions were not persisted — created random UUID in memory only,
-    # so crisis logging and end_session were silent no-ops for anon users
     session_id = await queries.create_session(user_id, body.device_id)
     return StartSessionResponse(session=SessionData(
         id=session_id,
         mode=body.mode,
-        # Bug #39: language isn't known until first turn — removed misleading "en" default
         started_at=datetime.now(timezone.utc).isoformat(),
     ))
 
@@ -72,49 +103,44 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
     user_id = user["sub"] if user else None
     device_id = body.device_id
 
-    # Bug #6: device_id=None collapsed all anon users into one quota:anon:None:date key
     if not user_id and not device_id:
         raise HTTPException(status_code=400, detail="device_id required for anonymous sessions")
 
     async def event_stream():
         try:
-            # Bug #8: tier was read from the stale JWT (up to 1h old); look up current tier from DB
-            if user_id:
-                user_data = await queries.get_user_by_id(user_id)
-                tier = user_data["tier"] if user_data else "free"
-            else:
-                tier = "anonymous"
+            # Parallelize user-data fetch + language Redis lookup — they share no dependencies.
+            user_coro = queries.get_user_by_id(user_id) if user_id else asyncio.sleep(0)
+            user_data, lang = await asyncio.gather(
+                user_coro,
+                get_session_language(body.session_id),
+            )
+            tier = (user_data["tier"] if user_data else "free") if user_id else "anonymous"
 
             quota_remaining = await get_quota_remaining(user_id, device_id, tier)
             if quota_remaining == 0:
                 yield _sse("quota_exhausted", {"tier": tier})
                 return
 
-            # Resolve language: voice hint (from STT) → Redis cache → DB fallback → text detection
-            lang = await get_session_language(body.session_id)
+            # Finish language resolution if Redis was a miss.
             if lang is None:
                 if user_id:
                     lang = await queries.get_session_language_from_db(body.session_id)
                     if lang:
-                        await set_session_language(body.session_id, lang)
+                        asyncio.create_task(set_session_language(body.session_id, lang))
                 if lang is None:
-                    # For voice turns, trust STT-detected language over character-based text detection
                     if body.hint_language and body.source == "voice":
                         lang = body.hint_language
                     else:
                         lang = detect_language(body.message)
-                    await set_session_language(body.session_id, lang)
+                    asyncio.create_task(set_session_language(body.session_id, lang))
                     if user_id:
-                        await queries.update_session_language(body.session_id, lang)
+                        asyncio.create_task(queries.update_session_language(body.session_id, lang))
 
-            # C-3: emit language before stream so Flutter picks the correct TTS voice clone
             yield _sse("meta", {"language": lang})
 
             is_crisis, trigger = detect_crisis(body.message)
             if is_crisis:
-                asyncio.create_task(
-                    queries.log_crisis_event(body.session_id, trigger)
-                )
+                asyncio.create_task(queries.log_crisis_event(body.session_id, trigger))
                 yield _sse("safety", {"text": get_safety_response(lang)})
                 yield _sse("done", {})
                 return
@@ -126,6 +152,8 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
                 classify_intent(body.message),
             )
 
+            is_first_turn = (len(history) == 0)
+
             messages, system_blocks = assemble_prompt(
                 intent=intent,
                 history=history,
@@ -136,50 +164,108 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
                 mode=body.mode,
             )
 
-            start_time = time.time()
+            # Pre-allocate turn_id so we can return it immediately after streaming,
+            # without waiting for the Postgres INSERT.
+            preallocated_turn_id = str(_uuid.uuid4()) if user_id else None
+
+            t_request = time.time()
+            t_first_token: float | None = None
+            t_first_audio: float | None = None
             full_response = ""
-            # Bug #12: usage_out dict collects token counts from sonnet_stream after streaming completes
             usage_out: dict = {}
+
+            # Sentence-streaming TTS state
+            sentence_buf = ""
+            audio_results: dict[int, bytes] = {}
+            tts_tasks: list[asyncio.Task] = []
+            tts_seq = 0
+            next_emit = 0
 
             stream_error: Exception | None = None
             for attempt in range(2):
                 full_response = ""
                 usage_out = {}
+                sentence_buf = ""
+                audio_results.clear()
+                tts_tasks.clear()
+                tts_seq = 0
+                next_emit = 0
                 try:
                     async for token in sonnet_stream(messages, system_blocks, usage_out):
+                        if t_first_token is None:
+                            t_first_token = time.time()
                         full_response += token
                         yield _sse("token", {"text": token})
+
+                        # Accumulate into sentence buffer; fire TTS when sentence completes.
+                        sentence_buf += token
+                        sentences, sentence_buf = _pop_sentences(sentence_buf)
+                        for sentence in sentences:
+                            t = asyncio.create_task(_tts_bg(tts_seq, sentence, lang, audio_results))
+                            tts_tasks.append(t)
+                            tts_seq += 1
+
+                        # Non-blocking drain: emit any TTS chunks that are already ready.
+                        ready, next_emit = _flush_audio(audio_results, next_emit)
+                        for seq, wav in ready:
+                            if wav:
+                                if t_first_audio is None:
+                                    t_first_audio = time.time()
+                                yield _sse("audio_chunk", {
+                                    "seq": seq,
+                                    "b64": base64.b64encode(wav).decode(),
+                                    "mime": "audio/wav",
+                                })
+
                     stream_error = None
                     break
                 except Exception as e:
                     stream_error = e
                     if full_response:
-                        # Tokens already sent — can't retry without duplicating output
                         break
                     _log.warning("[turn] stream attempt %d failed: %r — retrying", attempt + 1, e)
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(0.3)
 
             if stream_error:
-                # Bug #24: str(e) could leak API key; log server-side only
                 _log.exception("[turn] stream error after retries: %r", stream_error)
                 if full_response and user_id:
-                    # Persist partial response so history isn't lost on stream failure
                     await session_svc.append_turn(body.session_id, body.message, full_response)
                 yield _sse("error", {"code": "STREAM_ERROR"})
                 return
 
-            latency_ms = int((time.time() - start_time) * 1000)
+            # Flush any remaining text as one last TTS chunk.
+            if sentence_buf.strip():
+                t = asyncio.create_task(_tts_bg(tts_seq, sentence_buf.strip(), lang, audio_results))
+                tts_tasks.append(t)
+                tts_seq += 1
+
+            # Wait for all in-flight TTS tasks, then emit remaining chunks in order.
+            if tts_tasks:
+                await asyncio.gather(*tts_tasks, return_exceptions=True)
+                ready, next_emit = _flush_audio(audio_results, next_emit)
+                for seq, wav in ready:
+                    if wav:
+                        if t_first_audio is None:
+                            t_first_audio = time.time()
+                        yield _sse("audio_chunk", {
+                            "seq": seq,
+                            "b64": base64.b64encode(wav).decode(),
+                            "mime": "audio/wav",
+                        })
+
+            latency_ms = int((time.time() - t_request) * 1000)
+            ttft_ms = int((t_first_token - t_request) * 1000) if t_first_token else None
+            first_audio_ms = int((t_first_audio - t_request) * 1000) if t_first_audio else None
             turn_seconds = estimate_turn_duration(full_response)
             tokens_used = usage_out.get("input_tokens", 0) + usage_out.get("output_tokens", 0)
 
-            # Bug #10: store_turn was fire-and-forget via create_task so turn_id was never returned;
-            # await it now so we can yield turn_id to the client before done
-            # C-2: append to Redis for both authed and anon users (anon needs context too)
+            # Append to Redis history (fast, keep awaited).
             await session_svc.append_turn(body.session_id, body.message, full_response)
 
-            turn_id = None
             if user_id:
-                turn_id, turn_count = await queries.store_turn(
+                # Return pre-allocated turn_id immediately — PG write is fire-and-forget.
+                yield _sse("turn_id", {"id": preallocated_turn_id})
+                asyncio.create_task(queries.store_turn(
                     session_id=body.session_id,
                     mode=body.mode,
                     user_input=body.message,
@@ -187,24 +273,35 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
                     tokens_used=tokens_used,
                     latency_ms=latency_ms,
                     rag_chunks_used=len(rag_chunks),
-                )
-                yield _sse("turn_id", {"id": turn_id})
-                if turn_count == 1:
-                    task = asyncio.create_task(_generate_title(body.session_id, body.message))
-                    task.add_done_callback(
-                        lambda t: t.exception() if not t.cancelled() and not t.exception() is None else None
-                    )
+                    turn_id=preallocated_turn_id,
+                ))
+                if is_first_turn:
+                    asyncio.create_task(_generate_title(body.session_id, body.message))
 
-            # C-1: voice turns are charged by /voice/tts (actual synthesized seconds).
-            # Only charge here for text-only turns where TTS is never called.
+            # C-1: voice turns charged by /voice/tts; only charge here for text-only turns.
             if body.source == "text":
                 limit = await get_tier_limit_seconds(tier)
                 new_used = await add_quota_usage(user_id, device_id, turn_seconds, limit)
                 if limit != -1 and new_used >= limit:
                     yield _sse("quota_exhausted", {"tier": tier, "upgrade_url": "/subscription"})
 
+            log_turn(
+                source="sse",
+                session_id=body.session_id,
+                user_id=user_id,
+                tier=tier,
+                lang=lang,
+                ttft_ms=ttft_ms,
+                first_audio_ms=first_audio_ms,
+                latency_ms=latency_ms,
+                rag_chunks=len(rag_chunks),
+                turn_seconds=turn_seconds,
+            )
+
             yield _sse("done", {
                 "latency_ms": latency_ms,
+                "ttft_ms": ttft_ms,
+                "first_audio_ms": first_audio_ms,
                 "rag_chunks": len(rag_chunks),
                 "turn_seconds": turn_seconds,
             })
@@ -219,7 +316,6 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
 @router.post("/usage", status_code=204)
 async def record_usage(body: UsageRequest, user: dict | None = Depends(get_current_user)):
     if user and body.turn_id:
-        # Bug #5: update was unconstrained — pass user_id so only the turn's owner can update it
         await queries.update_turn_audio_seconds(body.turn_id, body.played_seconds, user["sub"])
     user_id = user["sub"] if user else None
     if user_id:
@@ -234,7 +330,6 @@ async def record_usage(body: UsageRequest, user: dict | None = Depends(get_curre
 @router.post("/interrupt", status_code=204)
 async def interrupt_turn(body: InterruptRequest, user: dict | None = Depends(get_current_user)):
     if user and body.active_turn_id:
-        # Bug #5: same ownership constraint applied here
         await queries.update_turn_audio_seconds(body.active_turn_id, body.played_seconds, user["sub"])
     user_id = user["sub"] if user else None
     if user_id:
