@@ -40,6 +40,12 @@ class Settings(BaseSettings):
 
     firebase_service_account_path: str = "/app/firebase-service-account.json"
     app_env: str = "production"
+
+    # Phase 1 latency flags
+    rag_rerank_enabled: bool = False   # Haiku rerank OFF by default — saves 300-700 ms/turn
+    embed_cache_enabled: bool = True   # Redis embedding cache ON by default
+    # Phase 3: pre-warm embed cache on first final transcript so UtteranceEnd→RAG is faster
+    speculative_rag_enabled: bool = True
     # Bug #41: workers field removed — Gunicorn reads WORKERS env var directly, not Pydantic settings
 
     @property

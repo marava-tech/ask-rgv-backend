@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from core.config import settings
 from db.pool import close_pool, init_pool
-from routers import admin, auth, conversation, feedback, quotes, subscription, voice
+from routers import admin, auth, conversation, feedback, quotes, subscription, voice, voice_stream
 
 logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
@@ -112,6 +112,22 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_delete_empty_recent_sessions_with_lock, IntervalTrigger(hours=5))
     scheduler.add_job(_expire_subscriptions_with_lock, IntervalTrigger(hours=12))
     scheduler.start()
+
+    # Pre-synthesize static phrases (crisis, greeting, thinking) so first playback is instant.
+    try:
+        from services.phrase_cache import warmup_phrase_cache
+        await warmup_phrase_cache()
+    except Exception as e:
+        logger.warning("[startup] phrase cache warmup failed (non-fatal): %s", e)
+
+    # Seed Anthropic ephemeral cache with static persona block for all 3 languages.
+    # First real user turn then gets a cache hit — saves ~300 ms TTFT.
+    try:
+        from services.cache_warmer import warm_prompt_cache
+        await warm_prompt_cache()
+    except Exception as e:
+        logger.warning("[startup] prompt cache warmup failed (non-fatal): %s", e)
+
     yield
     scheduler.shutdown(wait=False)
     await close_pool()
@@ -133,6 +149,7 @@ app.include_router(subscription.router)
 app.include_router(quotes.router)
 app.include_router(admin.router)
 app.include_router(voice.router)
+app.include_router(voice_stream.router)
 app.include_router(feedback.router)
 
 
