@@ -7,10 +7,11 @@ from services.claude import haiku_call
 
 logger = logging.getLogger(__name__)
 
-QDRANT_SEARCH_URL = None
 SEARCH_LIMIT = 10
 RERANK_TOP_K = 5
 QUALITY_THRESHOLD = 2.5
+
+_http_client = httpx.AsyncClient(timeout=15.0, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5))
 
 
 def _qdrant_url() -> str:
@@ -20,7 +21,7 @@ def _qdrant_url() -> str:
 async def hybrid_search(query_text: str) -> list[dict]:
     try:
         embedding = await embed_query(query_text)
-    except Exception as e:
+    except Exception:
         logger.exception("[rag] embedding lookup failed; query len=%d", len(query_text))
         return []
 
@@ -45,13 +46,12 @@ async def hybrid_search(query_text: str) -> list[dict]:
 
     search_url = f"{_qdrant_url()}/points/search"
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            dense_r, sparse_r = await asyncio.gather(
-                client.post(search_url, json=dense_payload),
-                client.post(search_url, json=sparse_payload),
-            )
-            dense_r.raise_for_status()
-            sparse_r.raise_for_status()
+        dense_r, sparse_r = await asyncio.gather(
+            _http_client.post(search_url, json=dense_payload),
+            _http_client.post(search_url, json=sparse_payload),
+        )
+        dense_r.raise_for_status()
+        sparse_r.raise_for_status()
     except httpx.RequestError as e:
         logger.exception("[rag] qdrant request failed url=%s query len=%d error=%r", search_url, len(query_text), e)
         return []
@@ -88,6 +88,16 @@ def _rrf_fuse(dense: list, sparse: list, k: int = 60) -> list[dict]:
     return [{"id": pid, "score": score, "payload": payloads[pid]} for pid, score in ranked]
 
 
+def _score_order(chunks: list[dict]) -> list[dict]:
+    """Score-based ordering: 70% RRF + 30% quality_score. Replaces Haiku rerank."""
+    max_rrf = max((c["score"] for c in chunks), default=1.0) or 1.0
+    def combined(c: dict) -> float:
+        rrf = c["score"] / max_rrf
+        quality = min(c["payload"].get("quality_score", 3.0), 5.0) / 5.0
+        return 0.7 * rrf + 0.3 * quality
+    return sorted(chunks, key=combined, reverse=True)[:RERANK_TOP_K]
+
+
 async def rerank_with_haiku(query: str, chunks: list[dict]) -> list[dict]:
     if not chunks:
         return []
@@ -99,6 +109,7 @@ async def rerank_with_haiku(query: str, chunks: list[dict]) -> list[dict]:
         f"Query: {query}\n\nRank these chunks by relevance (most relevant first).\n"
         f"Return only a comma-separated list of numbers e.g. 3,1,2\n\n{numbered}"
     )
+    result = ""
     try:
         result = await haiku_call(prompt)
         order = [int(x.strip()) - 1 for x in result.split(",") if x.strip().isdigit()]
@@ -109,8 +120,7 @@ async def rerank_with_haiku(query: str, chunks: list[dict]) -> list[dict]:
                 reranked.append(c)
         return reranked[:RERANK_TOP_K]
     except Exception as e:
-        # Bug #25: parse failure was silently swallowed with no log — now observable
-        logger.warning("[rerank] parse failure: %r | raw output: %r", e, result if 'result' in dir() else "<no result>")
+        logger.warning("[rerank] parse failure: %r | raw output: %r", e, result)
         return chunks[:RERANK_TOP_K]
 
 
@@ -119,5 +129,7 @@ async def search_chunks(query: str) -> list[dict]:
     qualified = [c for c in fused if c["payload"].get("quality_score", 3) >= QUALITY_THRESHOLD]
     if not qualified:
         qualified = fused
-    reranked = await rerank_with_haiku(query, qualified[:SEARCH_LIMIT])
-    return reranked
+    candidates = qualified[:SEARCH_LIMIT]
+    if settings.rag_rerank_enabled:
+        return await rerank_with_haiku(query, candidates)
+    return _score_order(candidates)

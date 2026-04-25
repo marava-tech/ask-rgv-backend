@@ -172,21 +172,30 @@ async def get_user_sessions(
 async def store_turn(
     session_id: str, mode: str, user_input: str, response: str,
     tokens_used: int, latency_ms: int, rag_chunks_used: int,
-) -> tuple[str, int]:
+    turn_id: str | None = None,
+) -> None:
     pool = get_pool()
-    row = await pool.fetchrow(
-        """
-        INSERT INTO turns (session_id, mode, user_input, response, tokens_used, latency_ms, rag_chunks_used)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING id
-        """,
-        UUID(session_id), mode, user_input, response, tokens_used, latency_ms, rag_chunks_used,
-    )
-    updated = await pool.fetchrow(
-        "UPDATE sessions SET turn_count = turn_count + 1 WHERE id = $1 RETURNING turn_count",
+    if turn_id:
+        await pool.execute(
+            """
+            INSERT INTO turns (id, session_id, mode, user_input, response, tokens_used, latency_ms, rag_chunks_used)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            UUID(turn_id), UUID(session_id), mode, user_input, response, tokens_used, latency_ms, rag_chunks_used,
+        )
+    else:
+        await pool.execute(
+            """
+            INSERT INTO turns (session_id, mode, user_input, response, tokens_used, latency_ms, rag_chunks_used)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            """,
+            UUID(session_id), mode, user_input, response, tokens_used, latency_ms, rag_chunks_used,
+        )
+    await pool.execute(
+        "UPDATE sessions SET turn_count = turn_count + 1 WHERE id = $1",
         UUID(session_id),
     )
-    return str(row["id"]), updated["turn_count"]
 
 
 async def update_turn_audio_seconds(turn_id: str, played_seconds: int, user_id: str) -> None:
