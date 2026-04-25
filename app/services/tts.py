@@ -11,21 +11,25 @@ _log = logging.getLogger(__name__)
 SMALLEST_URL = "https://waves-api.smallest.ai/api/v1/lightning/get_speech"
 _TTS_CHAR_LIMIT = 250
 
-# Maps session language code → settings attribute name for that language's voice clone
 _VOICE_MAP = {
     "en": "smallest_ai_voice_en",
     "te": "smallest_ai_voice_te",
     "hi": "smallest_ai_voice_hi",
 }
 
+_http_client = httpx.AsyncClient(
+    timeout=30.0,
+    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+)
+
+_SEMAPHORE = asyncio.Semaphore(5)
+
 
 def _split_chunks(text: str, limit: int = _TTS_CHAR_LIMIT) -> list[str]:
     """Split text into sentence-boundary chunks each within limit chars."""
-    # B-08: include Devanagari (।॥) and Telugu-script dandas for proper sentence splitting
     sentences = re.split(r'(?<=[.!?।॥])\s+', text.strip())
     chunks, current = [], ""
     for sentence in sentences:
-        # Single sentence too long — hard-split at word boundary
         while len(sentence) > limit:
             space = sentence.rfind(' ', 0, limit)
             cut = space if space != -1 else limit
@@ -43,7 +47,6 @@ def _split_chunks(text: str, limit: int = _TTS_CHAR_LIMIT) -> list[str]:
 
 
 def _concat_wavs(wav_chunks: list[bytes]) -> bytes:
-    """Merge multiple WAV byte blobs into one, preserving the first header."""
     buf = io.BytesIO()
     with wave.open(buf, 'wb') as out:
         for i, chunk in enumerate(wav_chunks):
@@ -54,9 +57,6 @@ def _concat_wavs(wav_chunks: list[bytes]) -> bytes:
     return buf.getvalue()
 
 
-_SEMAPHORE = asyncio.Semaphore(5)
-
-
 def _strip_markdown(text: str) -> str:
     text = re.sub(r'\*{1,3}(.*?)\*{1,3}', r'\1', text)
     text = re.sub(r'_{1,2}(.*?)_{1,2}', r'\1', text)
@@ -65,9 +65,19 @@ def _strip_markdown(text: str) -> str:
     return text.strip()
 
 
-async def _synthesise_chunk(client: httpx.AsyncClient, text: str, voice_id: str) -> bytes:
+def _resolve_voice(language: str) -> str:
+    voice_attr = _VOICE_MAP.get(language)
+    if voice_attr is None:
+        raise RuntimeError(f"No voice mapping for language '{language}'")
+    voice_id = getattr(settings, voice_attr, None)
+    if not voice_id:
+        raise RuntimeError(f"Voice ID for language '{language}' is not configured (settings.{voice_attr} is empty)")
+    return voice_id
+
+
+async def _synthesise_chunk(text: str, voice_id: str) -> bytes:
     async with _SEMAPHORE:
-        response = await client.post(
+        response = await _http_client.post(
             SMALLEST_URL,
             headers={
                 "Authorization": f"Bearer {settings.smallest_ai_api_key}",
@@ -86,22 +96,22 @@ async def _synthesise_chunk(client: httpx.AsyncClient, text: str, voice_id: str)
         return response.content
 
 
+async def synthesise_sentence(text: str, language: str) -> bytes:
+    """Synthesize a single pre-split sentence for streaming TTS. Uses module-level client."""
+    text = _strip_markdown(text)
+    if not text:
+        return b""
+    voice_id = _resolve_voice(language)
+    return await _synthesise_chunk(text, voice_id)
+
+
 async def synthesise_speech(text: str, language: str) -> bytes:
     """Split text into ≤250-char chunks, call Smallest.ai in parallel, return merged WAV."""
-    voice_attr = _VOICE_MAP.get(language)
-    if voice_attr is None:
-        raise RuntimeError(f"No voice mapping for language '{language}'")
-    voice_id = getattr(settings, voice_attr, None)
-    if not voice_id:
-        raise RuntimeError(f"Voice ID for language '{language}' is not configured (settings.{voice_attr} is empty)")
-
+    voice_id = _resolve_voice(language)
     chunks = _split_chunks(_strip_markdown(text))
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        wav_chunks = await asyncio.gather(
-            *[_synthesise_chunk(client, chunk, voice_id) for chunk in chunks]
-        )
-
+    wav_chunks = await asyncio.gather(
+        *[_synthesise_chunk(chunk, voice_id) for chunk in chunks]
+    )
     if len(wav_chunks) == 1:
         return wav_chunks[0]
     return _concat_wavs(list(wav_chunks))

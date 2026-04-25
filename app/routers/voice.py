@@ -1,8 +1,7 @@
 import io
 import wave
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, File, status
 from pydantic import BaseModel
 
 from core.auth import get_current_user
@@ -19,6 +18,14 @@ ALLOWED_AUDIO_TYPES = {
     "audio/wav", "audio/x-wav", "audio/flac", "audio/aac",
 }
 MAX_AUDIO_BYTES = 10 * 1024 * 1024  # 10 MB
+
+# Deprecated: these endpoints are superseded by /voice/stream (Phase 3 WebSocket).
+# Kept for one release overlap. Remove after confirming all clients use /voice/stream.
+_DEPRECATION_HEADERS = {
+    "Deprecation": "true",
+    "Sunset": "Sat, 01 Nov 2026 00:00:00 GMT",
+    "Link": '</voice/stream>; rel="successor-version"',
+}
 
 
 def _wav_duration_seconds(wav_bytes: bytes, fallback_text: str = "") -> int:
@@ -46,10 +53,13 @@ async def _get_tier(user: dict | None, device_id: str | None) -> tuple[str, str 
 
 @router.post("/stt")
 async def speech_to_text(
+    response: Response,
     audio: UploadFile = File(...),
     device_id: str | None = None,
     user: dict | None = Depends(get_current_user),
 ):
+    response.headers.update(_DEPRECATION_HEADERS)
+
     # Bug #36: voice endpoints had no quota check — users could burn Deepgram spend freely
     tier, user_id, dev_id = await _get_tier(user, device_id)
     quota_remaining = await get_quota_remaining(user_id, dev_id, tier)
@@ -79,10 +89,13 @@ async def speech_to_text(
 
 @router.post("/tts")
 async def text_to_speech(
+    response: Response,
     body: TTSRequest,
     device_id: str | None = None,
     user: dict | None = Depends(get_current_user),
 ):
+    response.headers.update(_DEPRECATION_HEADERS)
+
     if not body.text.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty text")
 
