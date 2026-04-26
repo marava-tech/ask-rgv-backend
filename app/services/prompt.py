@@ -53,6 +53,7 @@ def assemble_prompt(
     user_input: str,
     mode: str,
     user_memories: str | None = None,
+    user_name: str | None = None,
 ) -> tuple[list[dict], list[dict]]:
     rag_text = ""
     if rag_chunks:
@@ -65,6 +66,7 @@ def assemble_prompt(
     mode_note = _MODE_PROMPTS.get(mode, "")
     lang_note = f"\n[Respond in: {'Telugu' if language == 'te' else 'Hindi' if language == 'hi' else 'English'}]"
     memory_block = f"\n\n[USER_MEMORY]\n{user_memories}" if user_memories else ""
+    name_note = f"\n[The user's name is {user_name}. Address them as {user_name} naturally in your responses.]" if user_name else ""
 
     static_system = SYSTEM_PERSONA
     if style_anchors:
@@ -72,9 +74,9 @@ def assemble_prompt(
 
     if mode == "argue":
         # Argue mode overrides intent approach — the mode prompt handles turn direction entirely.
-        dynamic_text = f"{mode_note}{lang_note}{memory_block}"
+        dynamic_text = f"{mode_note}{lang_note}{name_note}{memory_block}"
     else:
-        dynamic_text = f"[APPROACH FOR THIS TURN: {approach}]{mode_note}{lang_note}{memory_block}"
+        dynamic_text = f"[APPROACH FOR THIS TURN: {approach}]{mode_note}{lang_note}{name_note}{memory_block}"
 
     system_blocks: list[dict] = [
         {
