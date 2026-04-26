@@ -8,10 +8,14 @@ from core.config import settings
 
 _log = logging.getLogger(__name__)
 
-SMALLEST_URL = "https://waves-api.smallest.ai/api/v1/lightning/get_speech"
+SMALLEST_URL = "https://api.smallest.ai/waves/v1/lightning-v3.1/get_speech"
 _TTS_CHAR_LIMIT = 250
 
-_VOICE_ID = "voice_NWOz3M9u8X"  # rgv-english-voice — used for all languages
+_VOICE_MAP = {
+    "en": "voice_NWOz3M9u8X",
+    "te": "voice_NWOz3M9u8X",
+    "hi": "voice_NWOz3M9u8X",
+}
 
 _http_client = httpx.AsyncClient(
     timeout=30.0,
@@ -97,7 +101,7 @@ def _prepend_silence(wav_bytes: bytes, ms: int = 80, sample_rate: int = 24000) -
 
 
 def _resolve_voice(language: str) -> str:
-    return _VOICE_ID
+    return _VOICE_MAP.get(language, _VOICE_MAP["en"])
 
 
 async def _synthesise_chunk(text: str, voice_id: str) -> bytes:
@@ -113,7 +117,7 @@ async def _synthesise_chunk(text: str, voice_id: str) -> bytes:
                 "voice_id": voice_id,
                 "sample_rate": 24000,
                 "speed": 1.0,
-                "add_wav_header": True,
+                "output_format": "wav",
             },
         )
         if response.status_code != 200:

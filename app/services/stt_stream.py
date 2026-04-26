@@ -9,7 +9,7 @@ _log = logging.getLogger(__name__)
 
 _WS_URL_BASE = (
     "wss://api.deepgram.com/v1/listen"
-    "?model=nova-2"
+    "?model=nova-3"
     "&interim_results=true"
     "&endpointing=300"
     "&utterance_end_ms=1000"
