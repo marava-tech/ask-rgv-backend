@@ -136,10 +136,12 @@ async def create_subscription_order(body: CreateOrderRequest, user: dict = Depen
             period_end = period_end.replace(tzinfo=timezone.utc)
         calc = _calc_prorated_upgrade(period_end)
         order = await create_upgrade_order(calc["prorated_amount_paise"])
+        expected_paise = calc["prorated_amount_paise"]
     else:
         order = await create_order(body.tier)
+        expected_paise = TIER_AMOUNTS.get(body.tier)
 
-    await queries.create_subscription_order(user["sub"], body.tier, order["id"])
+    await queries.create_subscription_order(user["sub"], body.tier, order["id"], expected_paise)
     return CreateOrderResponse(order_id=order["id"], amount=order["amount"], key_id=settings.razorpay_key_id)
 
 
@@ -162,24 +164,19 @@ async def razorpay_webhook(request: Request):
         if not sub_row:
             return {"status": "ok"}
 
-        # For upgrade orders the captured amount won't match TIER_AMOUNTS — skip fixed-amount check.
-        # We only verify the full amount for non-upgrade (fresh) subscriptions.
-        expected_amount = TIER_AMOUNTS.get(sub_row["tier"])
+        # Verify exact captured amount against what was stored at order creation.
+        expected_paise = sub_row.get("expected_amount_paise")
         captured_amount = payment.get("amount")
-        # Allow if captured amount equals full price OR is at least ₹1 (upgrade proration)
-        if expected_amount and captured_amount != expected_amount:
-            # Treat as valid upgrade payment if amount is reasonable (≥ ₹1, ≤ full price)
-            if captured_amount < 100 or captured_amount > expected_amount:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Amount out of valid range: got {captured_amount}",
-                )
+        if expected_paise and captured_amount != expected_paise:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Amount mismatch: expected {expected_paise}, got {captured_amount}",
+            )
 
-        row = await queries.activate_subscription(
+        # Atomic: activates subscription AND updates user.tier in one transaction.
+        await queries.activate_subscription_and_update_tier(
             payment_id=payment["id"],
             order_id=order_id,
         )
-        if row:
-            await queries.update_user_tier(str(row["user_id"]), row["tier"])
 
     return {"status": "ok"}

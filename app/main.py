@@ -66,7 +66,7 @@ async def _delete_empty_recent_sessions():
             """
             DELETE FROM sessions
             WHERE turn_count = 0
-              AND started_at BETWEEN now() - interval '61 minutes' AND now()
+              AND started_at < now() - interval '1 hour'
             """
         )
         logger.info("[scheduler] empty_session_cleanup: %s", result)
@@ -141,6 +141,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    max_age=600,
 )
 
 app.include_router(auth.router)

@@ -75,14 +75,14 @@ class RenameSessionRequest(BaseModel):
 class UsageRequest(BaseModel):
     session_id: str
     turn_id: str | None = None
-    played_seconds: int
+    played_seconds: int = Field(ge=0, le=600)
     device_id: str | None = None
 
 
 class InterruptRequest(BaseModel):
     session_id: str
     active_turn_id: str
-    played_seconds: int
+    played_seconds: int = Field(ge=0, le=600)
     device_id: str | None = None
 
 
