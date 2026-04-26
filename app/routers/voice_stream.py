@@ -186,7 +186,7 @@ async def voice_stream(
 
     read_task = asyncio.create_task(_read_client())
     dg_task = asyncio.create_task(
-        stt_stream.run_deepgram_stream(audio_queue, on_interim, on_final, on_utterance_end)
+        stt_stream.run_deepgram_stream(audio_queue, on_interim, on_final, on_utterance_end, language=lang)
     )
 
     try:
