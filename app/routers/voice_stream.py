@@ -45,7 +45,7 @@ def _pop_sentences(buf: str) -> tuple[list[str], str]:
 
 async def _tts_bg(seq: int, text: str, lang: str, results: dict[int, bytes]) -> None:
     try:
-        wav = await synthesise_sentence(text, lang)
+        wav = await synthesise_sentence(text, lang, prepend_silence=(seq == 0))
         results[seq] = wav
     except Exception as e:
         _log.warning("[voice_stream:tts] seq=%d failed: %r", seq, e)
