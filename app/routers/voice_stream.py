@@ -111,6 +111,25 @@ async def voice_stream(
     """
     await ws.accept()
 
+    # Flutter sends auth token as first text frame ({"type":"auth","token":"..."})
+    # to avoid it appearing in server/proxy logs. Peek at the first message if
+    # no token was passed as a query param.
+    _peeked_audio: bytes | None = None
+    if not token:
+        try:
+            first = await asyncio.wait_for(ws.receive(), timeout=3.0)
+            if first.get("type") == "websocket.receive":
+                text = first.get("text")
+                if text:
+                    ctrl = json.loads(text)
+                    if ctrl.get("type") == "auth":
+                        token = ctrl.get("token")
+                else:
+                    # Anonymous user — first frame is already audio; save it
+                    _peeked_audio = first.get("bytes")
+        except (asyncio.TimeoutError, Exception):
+            pass
+
     user = await _resolve_user(token)
     user_id = user["sub"] if user else None
 
@@ -161,6 +180,8 @@ async def voice_stream(
             utterance_future.set_result((text, language))
 
     async def _read_client() -> None:
+        if _peeked_audio:
+            await audio_queue.put(_peeked_audio)
         try:
             while True:
                 msg = await ws.receive()

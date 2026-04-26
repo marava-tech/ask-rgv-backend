@@ -114,6 +114,10 @@ async def run_deepgram_stream(
                         last_lang = lang
                         if is_final or speech_final:
                             await on_final(text, lang)
+                            if speech_final:
+                                # speech_final marks end of speech segment — resolve immediately
+                                # without waiting for UtteranceEnd (which requires extra silence)
+                                await on_utterance_end(text, lang)
                         else:
                             await on_interim(text, lang)
 
