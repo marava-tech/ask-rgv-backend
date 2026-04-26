@@ -13,8 +13,8 @@ _TTS_CHAR_LIMIT = 250
 
 _VOICE_MAP = {
     "en": "voice_NWOz3M9u8X",
-    "te": "voice_NWOz3M9u8X",
-    "hi": "voice_NWOz3M9u8X",
+    "te": "voice_Pf6rxIAabq",
+    "hi": "voice_0X99jM0G3H",
 }
 
 _http_client = httpx.AsyncClient(
