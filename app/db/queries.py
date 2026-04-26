@@ -243,42 +243,51 @@ async def get_active_subscription(user_id: str) -> dict | None:
 async def get_subscription_by_order_id(order_id: str) -> dict | None:
     pool = get_pool()
     row = await pool.fetchrow(
-        "SELECT id, user_id, tier, status FROM subscriptions WHERE razorpay_order_id = $1",
+        "SELECT id, user_id, tier, status, expected_amount_paise FROM subscriptions WHERE razorpay_order_id = $1",
         order_id,
     )
     return dict(row) if row else None
 
 
-async def create_subscription_order(user_id: str, tier: str, order_id: str) -> str:
+async def create_subscription_order(
+    user_id: str, tier: str, order_id: str, expected_amount_paise: int | None = None
+) -> str:
     pool = get_pool()
     row = await pool.fetchrow(
         """
-        INSERT INTO subscriptions (user_id, tier, razorpay_order_id, status)
-        VALUES ($1, $2, $3, 'pending')
+        INSERT INTO subscriptions (user_id, tier, razorpay_order_id, status, expected_amount_paise)
+        VALUES ($1, $2, $3, 'pending', $4)
         RETURNING id
         """,
-        UUID(user_id), tier, order_id,
+        UUID(user_id), tier, order_id, expected_amount_paise,
     )
     return str(row["id"])
 
 
-async def activate_subscription(payment_id: str, order_id: str) -> dict | None:
+async def activate_subscription_and_update_tier(payment_id: str, order_id: str) -> dict | None:
+    """Activate a pending subscription and update the user's tier in one atomic transaction."""
     pool = get_pool()
-    # Bug #15A: no status='pending' guard — duplicate webhook kept resetting period_end
-    # Bug #15B: updated_at never set
-    # Use GREATEST to extend existing period rather than overwrite it
-    row = await pool.fetchrow(
-        """
-        UPDATE subscriptions
-        SET status = 'active',
-            razorpay_payment_id = $1,
-            current_period_end = GREATEST(COALESCE(current_period_end, now()), now()) + interval '30 days',
-            updated_at = now()
-        WHERE razorpay_order_id = $2 AND status IN ('pending', 'active')
-        RETURNING user_id, tier
-        """,
-        payment_id, order_id,
-    )
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                WITH activated AS (
+                    UPDATE subscriptions
+                    SET status = 'active',
+                        razorpay_payment_id = $1,
+                        current_period_end = GREATEST(COALESCE(current_period_end, now()), now()) + interval '30 days',
+                        updated_at = now()
+                    WHERE razorpay_order_id = $2 AND status = 'pending'
+                    RETURNING user_id, tier
+                )
+                UPDATE users
+                SET tier = activated.tier
+                FROM activated
+                WHERE users.id = activated.user_id
+                RETURNING activated.user_id AS user_id, activated.tier AS tier
+                """,
+                payment_id, order_id,
+            )
     return dict(row) if row else None
 
 

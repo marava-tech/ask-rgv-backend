@@ -9,7 +9,8 @@ _CONFIG_TTL = 600  # 10 minutes
 # BO-04: in-memory cache for full config rows (including description/updated_at).
 # Avoids a Postgres round-trip on every admin dashboard poll (every 30 s).
 _full_rows_cache: tuple[list[dict], float] | None = None
-_FULL_ROWS_CACHE_TTL = 30.0
+# Short TTL so multi-worker drift is bounded to 5 s; Redis is authoritative.
+_FULL_ROWS_CACHE_TTL = 5.0
 
 
 async def get_all_config() -> dict[str, str]:
