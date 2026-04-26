@@ -21,12 +21,14 @@ _WS_URL_BASE = (
     "&smart_format=true"
 )
 
-# detect_language is NOT supported in streaming mode (pre-recorded only) — use explicit language param instead.
-_LANG_MAP = {"te": "te", "hi": "hi", "en": "en-US"}
+# nova-3 supports language=multi for multilingual streaming detection.
+# Use explicit language code when known; fall back to "multi" so a new
+# session is not force-labelled English before language is established.
+_LANG_MAP = {"te": "te", "hi": "hi", "en": "en-US", "multi": "multi"}
 
 
 def _build_ws_url(language: str | None) -> str:
-    lang_param = _LANG_MAP.get(language or "en", "en-US")
+    lang_param = _LANG_MAP.get(language or "multi", "multi")
     return f"{_WS_URL_BASE}&language={lang_param}"
 
 
