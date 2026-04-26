@@ -130,6 +130,8 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
                 if lang is None:
                     if body.hint_language and body.source == "voice":
                         lang = body.hint_language
+                    elif user_data and user_data.get("preferred_language"):
+                        lang = user_data["preferred_language"]
                     else:
                         lang = detect_language(body.message)
                     asyncio.create_task(set_session_language(body.session_id, lang))
@@ -162,6 +164,7 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
                 language=lang,
                 user_input=body.message,
                 mode=body.mode,
+                user_name=user_data.get("preferred_name") if user_data else None,
             )
 
             # Pre-allocate turn_id so we can return it immediately after streaming,
