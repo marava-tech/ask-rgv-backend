@@ -1,21 +1,15 @@
 import logging
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
 
 from core.auth import get_current_user
 from db import queries
+from models.schemas import BugReportRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/feedback", tags=["feedback"])
 
 _MAX_DEVICE_INFO_KEYS = 20
-
-
-class BugReportRequest(BaseModel):
-    description: str = Field(..., min_length=10, max_length=2000)
-    screenshot_url: str | None = Field(default=None, max_length=500)
-    device_info: dict | None = None
 
 
 @router.post("/bug", status_code=201)

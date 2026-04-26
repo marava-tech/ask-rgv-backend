@@ -12,6 +12,7 @@ from db import queries
 from db.pool import get_pool
 from models.schemas import (
     AdminLoginRequest,
+    BugReportUpdateRequest,
     IngestBulkRequest,
     IngestSingleRequest,
     QuoteCreateRequest,
@@ -429,6 +430,34 @@ async def reset_user_quota(user_id: str):
 async def list_bug_reports(
     limit: int = 50,
     offset: int = 0,
+    status: str | None = None,
     _: dict = Depends(require_admin),
 ):
-    return await queries.get_bug_reports(limit=limit, offset=offset)
+    items = await queries.get_bug_reports(limit=limit, offset=offset, status=status)
+    total = await queries.count_bug_reports(status=status)
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/bug-reports/{bug_id}")
+async def get_bug_report(bug_id: int, _: dict = Depends(require_admin)):
+    row = await queries.get_bug_report_by_id(bug_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Bug report not found")
+    return row
+
+
+@router.patch("/bug-reports/{bug_id}")
+async def update_bug_report(
+    bug_id: int,
+    body: BugReportUpdateRequest,
+    admin_payload: dict = Depends(require_admin),
+):
+    updated = await queries.update_bug_report(
+        bug_id,
+        status=body.status,
+        admin_notes=body.admin_notes,
+        resolved_by=admin_payload.get("sub"),
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Bug report not found")
+    return updated

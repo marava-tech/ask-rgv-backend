@@ -538,15 +538,108 @@ async def insert_bug_report(
     )
 
 
-async def get_bug_reports(limit: int = 50, offset: int = 0) -> list:
+async def get_bug_reports(limit: int = 50, offset: int = 0, status: str | None = None) -> list:
     pool = get_pool()
-    rows = await pool.fetch(
-        """
-        SELECT id, user_id, description, screenshot_url, device_info, created_at
-        FROM bug_reports
-        ORDER BY created_at DESC
-        LIMIT $1 OFFSET $2
-        """,
-        limit, offset,
-    )
+    if status:
+        rows = await pool.fetch(
+            """
+            SELECT br.id, br.user_id, u.email AS user_email, br.description,
+                   br.screenshot_url, br.device_info, br.status, br.admin_notes,
+                   br.created_at, br.resolved_at
+            FROM bug_reports br
+            LEFT JOIN users u ON u.id = br.user_id
+            WHERE br.status = $3
+            ORDER BY br.created_at DESC
+            LIMIT $1 OFFSET $2
+            """,
+            limit, offset, status,
+        )
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT br.id, br.user_id, u.email AS user_email, br.description,
+                   br.screenshot_url, br.device_info, br.status, br.admin_notes,
+                   br.created_at, br.resolved_at
+            FROM bug_reports br
+            LEFT JOIN users u ON u.id = br.user_id
+            ORDER BY br.created_at DESC
+            LIMIT $1 OFFSET $2
+            """,
+            limit, offset,
+        )
     return [dict(r) for r in rows]
+
+
+async def count_bug_reports(status: str | None = None) -> int:
+    pool = get_pool()
+    if status:
+        return await pool.fetchval(
+            "SELECT COUNT(*) FROM bug_reports WHERE status = $1",
+            status,
+        )
+    return await pool.fetchval("SELECT COUNT(*) FROM bug_reports")
+
+
+async def get_bug_report_by_id(bug_id: int) -> dict | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT br.id, br.user_id, u.email AS user_email, br.description,
+               br.screenshot_url, br.device_info, br.status, br.admin_notes,
+               br.created_at, br.resolved_at
+        FROM bug_reports br
+        LEFT JOIN users u ON u.id = br.user_id
+        WHERE br.id = $1
+        """,
+        bug_id,
+    )
+    return dict(row) if row else None
+
+
+async def update_bug_report(
+    bug_id: int,
+    status: str | None,
+    admin_notes: str | None,
+    resolved_by: str | None,
+) -> dict | None:
+    import datetime
+    pool = get_pool()
+    sets: list[str] = []
+    params: list = []
+    idx = 1
+
+    if status is not None:
+        sets.append(f"status = ${idx}")
+        params.append(status)
+        idx += 1
+        if status in ("resolved", "wont_fix"):
+            sets.append(f"resolved_at = ${idx}")
+            params.append(datetime.datetime.now(datetime.timezone.utc))
+            idx += 1
+            sets.append(f"resolved_by = ${idx}")
+            params.append(resolved_by)
+            idx += 1
+        else:
+            sets.extend([f"resolved_at = ${idx}", f"resolved_by = ${idx + 1}"])
+            params.extend([None, None])
+            idx += 2
+
+    if admin_notes is not None:
+        sets.append(f"admin_notes = ${idx}")
+        params.append(admin_notes)
+        idx += 1
+
+    if not sets:
+        return await get_bug_report_by_id(bug_id)
+
+    params.append(bug_id)
+    row = await pool.fetchrow(
+        f"""
+        UPDATE bug_reports SET {', '.join(sets)}
+        WHERE id = ${idx}
+        RETURNING id, user_id, description, screenshot_url, device_info,
+                  status, admin_notes, created_at, resolved_at
+        """,
+        *params,
+    )
+    return dict(row) if row else None
