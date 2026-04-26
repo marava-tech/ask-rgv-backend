@@ -55,10 +55,11 @@ async def _nightly_cleanup_with_lock():
     await _with_leader_lock("nightly_cleanup", _nightly_cleanup)
 
 
-async def _delete_empty_recent_sessions():
-    """Runs every hour — deletes sessions with no turns started in the last 61 minutes.
-    The extra minute is a clock-skew buffer so sessions at the top of the hour aren't missed.
-    Covers both authenticated and anonymous sessions."""
+async def _cleanup_empty_sessions():
+    """Runs every 3 hours — deletes sessions with no turns older than 3 hours.
+    These show as 'Conversation' (null title) in the history screen and represent
+    abandoned sessions where the user opened but never spoke. Covers both authenticated
+    and anonymous sessions."""
     try:
         from db.pool import get_pool
         pool = get_pool()
@@ -66,7 +67,7 @@ async def _delete_empty_recent_sessions():
             """
             DELETE FROM sessions
             WHERE turn_count = 0
-              AND started_at < now() - interval '1 hour'
+              AND started_at < now() - interval '3 hours'
             """
         )
         logger.info("[scheduler] empty_session_cleanup: %s", result)
@@ -74,8 +75,8 @@ async def _delete_empty_recent_sessions():
         logger.error("[scheduler] empty_session_cleanup error: %s", e)
 
 
-async def _delete_empty_recent_sessions_with_lock():
-    await _with_leader_lock("empty_session_cleanup", _delete_empty_recent_sessions, ttl=17900)
+async def _cleanup_empty_sessions_with_lock():
+    await _with_leader_lock("empty_session_cleanup", _cleanup_empty_sessions, ttl=10790)
 
 
 async def _expire_subscriptions():
@@ -109,7 +110,7 @@ async def lifespan(app: FastAPI):
     await run_pending(get_pool())
 
     scheduler.add_job(_nightly_cleanup_with_lock, CronTrigger(hour=0, minute=0))
-    scheduler.add_job(_delete_empty_recent_sessions_with_lock, IntervalTrigger(hours=5))
+    scheduler.add_job(_cleanup_empty_sessions_with_lock, IntervalTrigger(hours=3))
     scheduler.add_job(_expire_subscriptions_with_lock, IntervalTrigger(hours=12))
     scheduler.start()
 
