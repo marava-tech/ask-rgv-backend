@@ -11,11 +11,7 @@ _log = logging.getLogger(__name__)
 SMALLEST_URL = "https://waves-api.smallest.ai/api/v1/lightning/get_speech"
 _TTS_CHAR_LIMIT = 250
 
-_VOICE_MAP = {
-    "en": "smallest_ai_voice_en",
-    "te": "smallest_ai_voice_te",
-    "hi": "smallest_ai_voice_hi",
-}
+_VOICE_ID = "voice_NWOz3M9u8X"  # rgv-english-voice — used for all languages
 
 _http_client = httpx.AsyncClient(
     timeout=30.0,
@@ -101,13 +97,7 @@ def _prepend_silence(wav_bytes: bytes, ms: int = 80, sample_rate: int = 24000) -
 
 
 def _resolve_voice(language: str) -> str:
-    voice_attr = _VOICE_MAP.get(language)
-    if voice_attr is None:
-        raise RuntimeError(f"No voice mapping for language '{language}'")
-    voice_id = getattr(settings, voice_attr, None)
-    if not voice_id:
-        raise RuntimeError(f"Voice ID for language '{language}' is not configured (settings.{voice_attr} is empty)")
-    return voice_id
+    return _VOICE_ID
 
 
 async def _synthesise_chunk(text: str, voice_id: str) -> bytes:
