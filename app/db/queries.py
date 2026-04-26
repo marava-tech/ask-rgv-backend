@@ -210,17 +210,24 @@ async def update_turn_audio_seconds(turn_id: str, played_seconds: int, user_id: 
     )
 
 
-async def get_session_turns(session_id: str) -> list[dict]:
+async def get_session_turns(
+    session_id: str,
+    limit: int = 200,
+    before: datetime | None = None,
+) -> list[dict]:
     pool = get_pool()
     rows = await pool.fetch(
         """
         SELECT id, session_id, mode, user_input, response, tokens_used, latency_ms,
                rag_chunks_used, audio_played_seconds, created_at
-        FROM turns WHERE session_id = $1 ORDER BY created_at ASC
+        FROM turns
+        WHERE session_id = $1
+          AND ($3::timestamptz IS NULL OR created_at < $3)
+        ORDER BY created_at DESC LIMIT $2
         """,
-        UUID(session_id),
+        UUID(session_id), limit, before,
     )
-    return [dict(r) for r in rows]
+    return [dict(r) for r in reversed(rows)]
 
 
 # ── Subscriptions ─────────────────────────────────────────────────────────────

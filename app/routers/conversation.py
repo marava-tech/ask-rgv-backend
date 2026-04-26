@@ -362,6 +362,7 @@ async def conversation_history(
 ):
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+    limit = max(1, min(100, limit))
     sessions = await queries.get_user_sessions(user["sub"], limit, offset, q)
     return [dict(s) for s in sessions]
 
@@ -390,11 +391,20 @@ async def rename_session(
 
 
 @router.get("/sessions/{session_id}/turns")
-async def get_session_detail(session_id: str, user: dict = Depends(get_current_user)):
+async def get_session_detail(
+    session_id: str,
+    limit: int = 200,
+    before: str | None = None,
+    user: dict = Depends(get_current_user),
+):
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
-    session = await queries.get_session(session_id)
+    limit = max(1, min(500, limit))
+    before_dt = datetime.fromisoformat(before) if before else None
+    session, turns = await asyncio.gather(
+        queries.get_session(session_id),
+        queries.get_session_turns(session_id, limit=limit, before=before_dt),
+    )
     if not session or (session["user_id"] and str(session["user_id"]) != user["sub"]):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
-    turns = await queries.get_session_turns(session_id)
-    return [dict(t) for t in turns]
+    return turns
