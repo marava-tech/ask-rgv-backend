@@ -18,7 +18,7 @@ async def upsert_user(google_id: str, email: str, display_name: str, avatar_url:
             SET email = EXCLUDED.email,
                 display_name = EXCLUDED.display_name,
                 avatar_url = EXCLUDED.avatar_url
-        RETURNING id, tier
+        RETURNING id, tier, preferred_language, preferred_name
         """,
         google_id, email, display_name, avatar_url,
     )
@@ -28,7 +28,7 @@ async def upsert_user(google_id: str, email: str, display_name: str, avatar_url:
 async def get_user_by_id(user_id: str) -> dict | None:
     pool = get_pool()
     row = await pool.fetchrow(
-        "SELECT id, google_id, email, display_name, avatar_url, tier, created_at FROM users WHERE id = $1",
+        "SELECT id, google_id, email, display_name, avatar_url, tier, preferred_language, preferred_name, created_at FROM users WHERE id = $1",
         UUID(user_id),
     )
     return dict(row) if row else None
@@ -37,6 +37,24 @@ async def get_user_by_id(user_id: str) -> dict | None:
 async def update_user_tier(user_id: str, tier: str) -> None:
     pool = get_pool()
     await pool.execute("UPDATE users SET tier = $1 WHERE id = $2", tier, UUID(user_id))
+
+
+async def update_user_preferred_language(user_id: str, lang: str) -> None:
+    pool = get_pool()
+    await pool.execute("UPDATE users SET preferred_language = $1 WHERE id = $2", lang, UUID(user_id))
+
+
+async def update_user_preferences(user_id: str, preferred_language: str | None, preferred_name: str | None) -> None:
+    pool = get_pool()
+    if preferred_language is not None and preferred_name is not None:
+        await pool.execute(
+            "UPDATE users SET preferred_language = $1, preferred_name = $2 WHERE id = $3",
+            preferred_language, preferred_name, UUID(user_id),
+        )
+    elif preferred_language is not None:
+        await pool.execute("UPDATE users SET preferred_language = $1 WHERE id = $2", preferred_language, UUID(user_id))
+    elif preferred_name is not None:
+        await pool.execute("UPDATE users SET preferred_name = $1 WHERE id = $2", preferred_name, UUID(user_id))
 
 
 # ── Refresh tokens ────────────────────────────────────────────────────────────

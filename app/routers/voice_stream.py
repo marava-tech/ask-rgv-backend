@@ -98,7 +98,7 @@ async def voice_stream(
     mode: str = "default",
     device_id: str | None = None,
     token: str | None = None,
-    hint_language: str | None = None,
+    hint_language: str | None = None,  # validated below against known codes
 ) -> None:
     """
     Unified bidirectional voice WebSocket.
@@ -110,6 +110,10 @@ async def voice_stream(
       audio, turn_id, quota_exhausted, done, error
     """
     await ws.accept()
+
+    # Reject bogus hint_language values before any audio is read.
+    if hint_language is not None and hint_language not in {"te", "hi", "en"}:
+        hint_language = None
 
     # Flutter sends auth token as first text frame ({"type":"auth","token":"..."})
     # to avoid it appearing in server/proxy logs. Peek at the first message if
@@ -205,9 +209,13 @@ async def voice_stream(
         finally:
             await audio_queue.put(None)
 
+    # Server-side preferred_language fallback: if hint_language not supplied by client,
+    # use the authenticated user's stored preference before falling back to multi.
+    effective_hint = hint_language or (user_data and user_data.get("preferred_language"))
+
     read_task = asyncio.create_task(_read_client())
     dg_task = asyncio.create_task(
-        stt_stream.run_deepgram_stream(audio_queue, on_interim, on_final, on_utterance_end, language=lang or hint_language)
+        stt_stream.run_deepgram_stream(audio_queue, on_interim, on_final, on_utterance_end, language=lang or effective_hint)
     )
 
     try:
@@ -264,6 +272,7 @@ async def voice_stream(
         language=lang,
         user_input=transcript,
         mode=mode,
+        user_name=user_data.get("preferred_name") if user_data else None,
     )
 
     preallocated_turn_id = str(_uuid.uuid4()) if user_id else None

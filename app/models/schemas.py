@@ -14,6 +14,13 @@ class UserInfo(BaseModel):
     name: str | None = None
     avatar_url: str | None = None
     tier: str
+    preferred_language: Literal["te", "hi", "en"] | None = None
+    preferred_name: str | None = None
+
+
+class UpdateMeRequest(BaseModel):
+    preferred_language: Literal["te", "hi", "en"] | None = None
+    preferred_name: str | None = Field(default=None, max_length=50)
 
 
 class TokenResponse(BaseModel):
