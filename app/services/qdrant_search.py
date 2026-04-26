@@ -112,8 +112,10 @@ async def rerank_with_haiku(query: str, chunks: list[dict]) -> list[dict]:
     result = ""
     try:
         result = await haiku_call(prompt)
-        order = [int(x.strip()) - 1 for x in result.split(",") if x.strip().isdigit()]
-        reranked = [chunks[i] for i in order if i < len(chunks)]
+        raw_order = [int(x.strip()) - 1 for x in result.split(",") if x.strip().isdigit()]
+        # deduplicate while preserving order
+        seen_order: dict[int, None] = dict.fromkeys(i for i in raw_order if i < len(chunks))
+        reranked = [chunks[i] for i in seen_order]
         seen = {c["id"] for c in reranked}
         for c in chunks:
             if c["id"] not in seen:

@@ -98,6 +98,7 @@ async def voice_stream(
     mode: str = "default",
     device_id: str | None = None,
     token: str | None = None,
+    hint_language: str | None = None,
 ) -> None:
     """
     Unified bidirectional voice WebSocket.
@@ -197,9 +198,8 @@ async def voice_stream(
         await ws.close()
         return
 
-    # Signal end of audio; let Deepgram task finish
-    if not audio_queue.full():
-        await audio_queue.put(None)
+    # Signal end of audio; let Deepgram task finish — always put sentinel, never skip
+    await audio_queue.put(None)
     read_task.cancel()
 
     if not transcript:
@@ -208,9 +208,9 @@ async def voice_stream(
         await dg_task
         return
 
-    # Language resolution
+    # Language resolution: prefer caller-supplied hint (mirrors /turn behaviour)
     if lang is None:
-        lang = detected_lang
+        lang = hint_language or detected_lang
         asyncio.create_task(set_session_language(session_id, lang))
         if user_id:
             asyncio.create_task(queries.update_session_language(session_id, lang))
@@ -257,6 +257,7 @@ async def voice_stream(
     tts_tasks: list[asyncio.Task] = []
     tts_seq = 0
     next_emit = 0
+    pipeline_error: Exception | None = None
 
     try:
         async for token_text in sonnet_stream(messages, system_blocks, usage_out):
@@ -305,7 +306,24 @@ async def voice_stream(
                     })
 
     except Exception as e:
-        _log.exception("[voice_stream] pipeline error: %r", e)
+        pipeline_error = e
+        # Cancel any remaining TTS tasks on failure
+        for t in tts_tasks:
+            t.cancel()
+        if tts_tasks:
+            await asyncio.gather(*tts_tasks, return_exceptions=True)
+
+    finally:
+        # Always charge quota for generated content, success or partial failure
+        if full_response:
+            turn_seconds = estimate_turn_duration(full_response)
+            limit = await get_tier_limit_seconds(tier)
+            new_used = await add_quota_usage(user_id, device_id, turn_seconds, limit)
+            if limit != -1 and new_used >= limit:
+                await _send({"type": "quota_exhausted", "tier": tier})
+
+    if pipeline_error:
+        _log.exception("[voice_stream] pipeline error: %r", pipeline_error)
         await _send({"type": "error", "code": "PIPELINE_ERROR"})
         await ws.close()
         await dg_task
@@ -334,12 +352,6 @@ async def voice_stream(
         ))
         if is_first_turn:
             asyncio.create_task(_generate_title(session_id, transcript))
-
-    # Quota deduction (rule #10: always awaited before done)
-    limit = await get_tier_limit_seconds(tier)
-    new_used = await add_quota_usage(user_id, device_id, turn_seconds, limit)
-    if limit != -1 and new_used >= limit:
-        await _send({"type": "quota_exhausted", "tier": tier})
 
     log_turn(
         source="ws",

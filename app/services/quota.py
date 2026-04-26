@@ -77,13 +77,6 @@ def _quota_key(user_id: str | None, device_id: str | None) -> str:
     return f"quota:anon:{device_id}:{week_key}"
 
 
-def _seconds_until_midnight_ist() -> int:
-    IST = timezone(timedelta(hours=5, minutes=30))
-    now = datetime.now(IST)
-    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return int((tomorrow - now).total_seconds())
-
-
 def _seconds_until_week_end_ist() -> int:
     IST = timezone(timedelta(hours=5, minutes=30))
     now = datetime.now(IST)

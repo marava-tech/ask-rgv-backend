@@ -227,6 +227,11 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
                     await asyncio.sleep(0.3)
 
             if stream_error:
+                # Cancel any in-flight TTS tasks to avoid leaking Smallest.ai calls
+                for t in tts_tasks:
+                    t.cancel()
+                if tts_tasks:
+                    await asyncio.gather(*tts_tasks, return_exceptions=True)
                 _log.exception("[turn] stream error after retries: %r", stream_error)
                 if full_response and user_id:
                     await session_svc.append_turn(body.session_id, body.message, full_response)

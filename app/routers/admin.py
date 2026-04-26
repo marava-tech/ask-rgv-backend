@@ -302,7 +302,7 @@ async def _run_rag_validation():
     pool = get_pool()
     await pool.execute(
         "INSERT INTO validation_runs (overall_score, passed, report_json) VALUES ($1, $2, $3)",
-        overall, passed, report,
+        overall, passed, json.dumps(report),
     )
 
 
@@ -361,7 +361,7 @@ Reply as JSON only: {{"directness":X,"philosophical_accuracy":X,"tone":X,"consis
     pool = get_pool()
     await pool.execute(
         "INSERT INTO validation_runs (overall_score, passed, report_json) VALUES ($1, $2, $3)",
-        overall, passed, report,
+        overall, passed, json.dumps(report),
     )
 
 
