@@ -12,7 +12,7 @@ from core.auth import (
 )
 from core.config import settings
 from db import queries
-from models.schemas import GoogleAuthRequest, LogoutRequest, RefreshRequest, TokenResponse, UserInfo
+from models.schemas import GoogleAuthRequest, LogoutRequest, RefreshRequest, TokenResponse, UpdateMeRequest, UserInfo
 from services.quota import blacklist_jwt, is_jwt_blacklisted
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -48,6 +48,8 @@ async def google_auth(body: GoogleAuthRequest):
             name=info.get("name"),
             avatar_url=info.get("picture"),
             tier=tier,
+            preferred_language=user.get("preferred_language"),
+            preferred_name=user.get("preferred_name"),
         ),
     )
 
@@ -94,7 +96,40 @@ async def refresh(body: RefreshRequest):
             name=user.get("display_name"),
             avatar_url=user.get("avatar_url"),
             tier=user["tier"],
+            preferred_language=user.get("preferred_language"),
+            preferred_name=user.get("preferred_name"),
         ),
+    )
+
+
+@router.get("/me", response_model=UserInfo)
+async def get_me(user: dict = Depends(require_user)):
+    row = await queries.get_user_by_id(user["sub"])
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    return UserInfo(
+        id=str(row["id"]),
+        email=row.get("email"),
+        name=row.get("display_name"),
+        avatar_url=row.get("avatar_url"),
+        tier=row["tier"],
+        preferred_language=row.get("preferred_language"),
+        preferred_name=row.get("preferred_name"),
+    )
+
+
+@router.patch("/me", response_model=UserInfo)
+async def update_me(body: UpdateMeRequest, user: dict = Depends(require_user)):
+    await queries.update_user_preferences(user["sub"], body.preferred_language, body.preferred_name)
+    row = await queries.get_user_by_id(user["sub"])
+    return UserInfo(
+        id=str(row["id"]),
+        email=row.get("email"),
+        name=row.get("display_name"),
+        avatar_url=row.get("avatar_url"),
+        tier=row["tier"],
+        preferred_language=row.get("preferred_language"),
+        preferred_name=row.get("preferred_name"),
     )
 
 
