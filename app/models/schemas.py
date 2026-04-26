@@ -142,3 +142,16 @@ class QuoteCreateRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=20000)
     source: str | None = Field(default=None, max_length=2000)
     language: Literal["en", "te", "hi"] = "en"
+
+
+# ── Bug reports ───────────────────────────────────────────────────────────────
+
+class BugReportRequest(BaseModel):
+    description: str = Field(..., min_length=10, max_length=2000)
+    screenshot_url: str | None = Field(default=None, max_length=500)
+    device_info: dict | None = None
+
+
+class BugReportUpdateRequest(BaseModel):
+    status: Literal["open", "in_progress", "resolved", "wont_fix"] | None = None
+    admin_notes: str | None = Field(default=None, max_length=2000)
