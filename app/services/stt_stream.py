@@ -7,7 +7,7 @@ from core.config import settings
 
 _log = logging.getLogger(__name__)
 
-_WS_URL = (
+_WS_URL_BASE = (
     "wss://api.deepgram.com/v1/listen"
     "?model=nova-2"
     "&interim_results=true"
@@ -19,8 +19,15 @@ _WS_URL = (
     "&channels=1"
     "&punctuate=true"
     "&smart_format=true"
-    "&detect_language=true"
 )
+
+# detect_language is NOT supported in streaming mode (pre-recorded only) — use explicit language param instead.
+_LANG_MAP = {"te": "te", "hi": "hi", "en": "en-US"}
+
+
+def _build_ws_url(language: str | None) -> str:
+    lang_param = _LANG_MAP.get(language or "en", "en-US")
+    return f"{_WS_URL_BASE}&language={lang_param}"
 
 
 def _normalise_lang(code: str) -> str:
@@ -37,6 +44,7 @@ async def run_deepgram_stream(
     on_interim: Callable[[str, str], Awaitable[None]],
     on_final: Callable[[str, str], Awaitable[None]],
     on_utterance_end: Callable[[str, str], Awaitable[None]],
+    language: str | None = None,
 ) -> None:
     """
     Open a Deepgram WebSocket, forward PCM frames from audio_queue, fire async callbacks.
@@ -49,6 +57,9 @@ async def run_deepgram_stream(
       on_interim(text, language)       — non-final transcript update
       on_final(text, language)         — is_final or speech_final result
       on_utterance_end(text, language) — VAD endpointing triggered
+
+    language: session language hint ("en", "te", "hi") — used to set Deepgram language param.
+              detect_language is NOT supported in streaming mode.
     """
     import websockets
 
@@ -58,10 +69,11 @@ async def run_deepgram_stream(
 
     headers = {"Authorization": f"Token {settings.deepgram_api_key}"}
     last_transcript = ""
-    last_lang = "en"
+    last_lang = language or "en"
+    ws_url = _build_ws_url(language)
 
     try:
-        async with websockets.connect(_WS_URL, additional_headers=headers) as ws:
+        async with websockets.connect(ws_url, additional_headers=headers) as ws:
 
             async def _send() -> None:
                 while True:
@@ -95,7 +107,7 @@ async def run_deepgram_stream(
                         text = alts[0].get("transcript", "").strip()
                         if not text:
                             continue
-                        lang = _normalise_lang(ch.get("detected_language", "en"))
+                        lang = _normalise_lang(ch.get("detected_language") or last_lang)
                         is_final = ev.get("is_final", False)
                         speech_final = ev.get("speech_final", False)
                         last_transcript = text
