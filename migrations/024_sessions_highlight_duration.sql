@@ -1,0 +1,2 @@
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS highlight_text TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS duration_seconds INTEGER;

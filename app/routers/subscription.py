@@ -59,9 +59,12 @@ async def subscription_status(
         tier = "anonymous"
         quota_remaining = await get_quota_remaining(None, device_id, tier)
         limit = await get_tier_limit_seconds(tier)
+        used = max(0, limit - quota_remaining) if limit >= 0 else 0
         return {
             "tier": tier,
             "remaining_seconds": quota_remaining,
+            "used_seconds": used,
+            "total_seconds": limit,
             "limit_seconds": limit,
             "remaining_credits": seconds_to_credits(quota_remaining),
             "limit_credits": limit_to_credits(limit),
@@ -74,11 +77,14 @@ async def subscription_status(
     quota_remaining = await get_quota_remaining(user["sub"], None, tier)
     sub = await queries.get_active_subscription(user["sub"])
     limit = await get_tier_limit_seconds(tier)
-    limit_seconds = limit if limit != -1 else 999999
+    limit_seconds = limit if limit != -1 else -1
+    used = max(0, limit_seconds - quota_remaining) if limit_seconds >= 0 else 0
     return {
         "tier": tier,
         "remaining_seconds": quota_remaining,
-        "limit_seconds": limit_seconds,
+        "used_seconds": used,
+        "total_seconds": limit_seconds,
+        "limit_seconds": limit_seconds if limit_seconds >= 0 else 999999,
         "remaining_credits": seconds_to_credits(quota_remaining) if quota_remaining >= 0 else -1,
         "limit_credits": limit_to_credits(limit),
         "exhausted": quota_remaining == 0,
