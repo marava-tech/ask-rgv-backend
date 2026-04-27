@@ -160,7 +160,13 @@ async def rename_session(session_id: str, user_id: str, title: str) -> bool:
 async def end_session(session_id: str, session_title: str | None = None) -> None:
     pool = get_pool()
     await pool.execute(
-        "UPDATE sessions SET ended_at = now(), session_title = COALESCE($2, session_title) WHERE id = $1",
+        """
+        UPDATE sessions
+        SET ended_at = now(),
+            session_title = COALESCE($2, session_title),
+            duration_seconds = EXTRACT(EPOCH FROM (now() - started_at))::int
+        WHERE id = $1
+        """,
         UUID(session_id), session_title,
     )
 
@@ -174,7 +180,7 @@ async def get_user_sessions(
     pool = get_pool()
     rows = await pool.fetch(
         """
-        SELECT id, session_title AS title, turn_count, language, started_at, ended_at
+        SELECT id, session_title AS title, turn_count, language, started_at, ended_at, highlight_text
         FROM sessions
         WHERE user_id = $1
           AND ($4::text IS NULL OR $4 = '' OR COALESCE(session_title, '') ILIKE '%' || $4 || '%')
