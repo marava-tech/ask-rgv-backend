@@ -7,7 +7,7 @@ import time
 import uuid as _uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 from core.auth import get_current_user
@@ -113,7 +113,7 @@ def _resolve_device_id(device_token: str | None, device_id: str | None) -> tuple
 
 
 @router.post("/turn")
-async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_current_user)):
+async def conversation_turn(request: Request, body: TurnRequest, user: dict | None = Depends(get_current_user)):
     user_id = user["sub"] if user else None
 
     device_id: str | None = None
@@ -172,7 +172,7 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
 
             is_first_turn = (len(history) == 0)
 
-            messages, system_blocks = assemble_prompt(
+            messages, system_blocks = await assemble_prompt(
                 intent=intent,
                 history=history,
                 rag_chunks=rag_chunks,
@@ -181,6 +181,7 @@ async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_c
                 user_input=body.message,
                 mode=body.mode,
                 user_name=user_data.get("preferred_name") if user_data else None,
+                loader=getattr(request.app.state, "prompt_loader", None),
             )
 
             # Pre-allocate turn_id so we can return it immediately after streaming,

@@ -242,8 +242,8 @@ async def validation_run():
 
 
 @router.post("/validation/persona-run", dependencies=[Depends(require_admin)], status_code=202)
-async def persona_run():
-    asyncio.create_task(_run_persona_qa())
+async def persona_run(request: Request):
+    asyncio.create_task(_run_persona_qa(getattr(request.app.state, "prompt_loader", None)))
     return {"status": "started"}
 
 
@@ -307,7 +307,7 @@ async def _run_rag_validation():
     )
 
 
-async def _run_persona_qa():
+async def _run_persona_qa(loader=None):
     from services.claude import sonnet_stream
     from services.prompt import assemble_prompt
     from services.claude import haiku_call
@@ -339,7 +339,7 @@ Reply as JSON only: {{"directness":X,"philosophical_accuracy":X,"tone":X,"consis
 
     for q in QUESTIONS:
         try:
-            messages, system_blocks = assemble_prompt("debating", [], [], "", "en", q, "default")
+            messages, system_blocks = await assemble_prompt("debating", [], [], "", "en", q, "default", loader=loader)
             response = ""
             async for token in sonnet_stream(messages, system_blocks):
                 response += token
@@ -516,3 +516,82 @@ async def waitlist_interests():
     counts = {r["category"]: r["cnt"] for r in rows}
     categories = ["tshirt", "hoodie", "poster", "mug", "not_sure"]
     return {cat: counts.get(cat, 0) for cat in categories}
+
+
+# ── Prompt Config endpoints ────────────────────────────────────────────────────
+
+@router.get("/prompts", dependencies=[Depends(require_admin)])
+async def list_prompts():
+    pool = get_pool()
+    rows = await pool.fetch(
+        "SELECT key, label, description, version, updated_at FROM prompt_configs ORDER BY key"
+    )
+    return [dict(r) for r in rows]
+
+
+@router.get("/prompts/{key}", dependencies=[Depends(require_admin)])
+async def get_prompt(key: str):
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT key, label, description, content, version, updated_at FROM prompt_configs WHERE key = $1",
+        key,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Prompt key '{key}' not found")
+    return dict(row)
+
+
+@router.put("/prompts/{key}", dependencies=[Depends(require_admin)])
+async def update_prompt(key: str, body: dict, request: Request):
+    content = body.get("content", "")
+    if not content or not content.strip():
+        raise HTTPException(status_code=422, detail="content must be a non-empty string")
+    if len(content) > 16000:
+        raise HTTPException(status_code=422, detail="content must be ≤ 16,000 characters")
+
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT version FROM prompt_configs WHERE key = $1", key
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Prompt key '{key}' not found")
+
+    new_version = row["version"] + 1
+    updated = await pool.fetchrow(
+        """
+        UPDATE prompt_configs
+           SET content = $1, version = $2, updated_at = now()
+         WHERE key = $3
+        RETURNING key, label, description, content, version, updated_at
+        """,
+        content, new_version, key,
+    )
+    await pool.execute(
+        """
+        INSERT INTO prompt_config_history (prompt_key, content, version)
+        VALUES ($1, $2, $3)
+        """,
+        key, content, new_version,
+    )
+
+    loader = getattr(request.app.state, "prompt_loader", None)
+    if loader is not None:
+        await loader.invalidate(key)
+
+    return dict(updated)
+
+
+@router.get("/prompts/{key}/history", dependencies=[Depends(require_admin)])
+async def get_prompt_history(key: str):
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT version, content, changed_at
+          FROM prompt_config_history
+         WHERE prompt_key = $1
+         ORDER BY changed_at DESC
+         LIMIT 50
+        """,
+        key,
+    )
+    return [dict(r) for r in rows]
