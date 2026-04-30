@@ -1,4 +1,5 @@
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,11 @@ SAFETY_RESPONSE = {
 def detect_crisis(text: str) -> tuple[bool, str]:
     lower = text.lower()
     for phrase in CRISIS_KEYWORDS:
-        if phrase in lower:
+        # Word-boundary check: phrase must not be embedded inside a longer word.
+        # Prevents "chanipovadam" from matching on "chani" substrings and
+        # "suicide" from matching only as part of compound romanized tokens.
+        pattern = r"(?<!\w)" + re.escape(phrase) + r"(?!\w)"
+        if re.search(pattern, lower):
             return True, phrase
     return False, ""
 
