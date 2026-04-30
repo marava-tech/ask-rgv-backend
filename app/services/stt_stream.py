@@ -139,5 +139,11 @@ async def run_deepgram_stream(
                 send_t.cancel()
                 recv_t.cancel()
 
+            # Deepgram closed without sending UtteranceEnd (common on short
+            # recordings or when CloseStream is sent before VAD triggers).
+            # Resolve the utterance_future now so the pipeline isn't stuck.
+            if last_transcript:
+                await on_utterance_end(last_transcript, last_lang)
+
     except Exception as e:
         _log.error("[stt_stream] Deepgram connection error: %r", e)
