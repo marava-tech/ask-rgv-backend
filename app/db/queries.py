@@ -929,26 +929,25 @@ async def get_pack_turns_remaining(user_id: str) -> int:
 
 async def get_user_memory(user_id: str) -> dict | None:
     pool = get_pool()
-    row = await pool.fetchrow(
-        "SELECT user_id, summary, key_facts, updated_at FROM user_memory WHERE user_id = $1",
+    rows = await pool.fetch(
+        """SELECT type, phrase FROM user_memory
+           WHERE user_id = $1
+           ORDER BY type, frequency DESC, confidence DESC""",
         UUID(user_id),
     )
-    return dict(row) if row else None
+    if not rows:
+        return None
+    by_type: dict[str, list[str]] = {}
+    for row in rows:
+        by_type.setdefault(row["type"], []).append(row["phrase"])
+    parts = [f"{t.capitalize()}s: {'; '.join(phrases)}" for t, phrases in by_type.items()]
+    return {"summary": ". ".join(parts), "key_facts": by_type}
 
 
 async def upsert_user_memory(user_id: str, summary: str, key_facts: dict) -> None:
-    import json as _json
-    pool = get_pool()
-    await pool.execute(
-        """
-        INSERT INTO user_memory (user_id, summary, key_facts, updated_at)
-        VALUES ($1, $2, $3::jsonb, now())
-        ON CONFLICT (user_id) DO UPDATE
-            SET summary = EXCLUDED.summary,
-                key_facts = EXCLUDED.key_facts,
-                updated_at = now()
-        """,
-        UUID(user_id), summary, _json.dumps(key_facts),
+    import logging
+    logging.getLogger(__name__).info(
+        "[queries] upsert_user_memory skipped — phrase-based schema requires embeddings (v2 feature)"
     )
 
 
