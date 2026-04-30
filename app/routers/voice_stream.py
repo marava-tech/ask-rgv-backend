@@ -2,7 +2,6 @@ import asyncio
 import base64
 import json
 import logging
-import re
 import time
 import uuid as _uuid
 
@@ -14,7 +13,7 @@ from core.config import settings
 from db import queries
 from services import session as session_svc
 from services import stt_stream
-from services.claude import haiku_call, sonnet_stream
+from services.claude import sonnet_stream
 from services.crisis import detect_crisis, get_safety_response
 from services.embedding import embed_query
 from services.intent import classify_intent
@@ -29,80 +28,13 @@ from services.quota import (
     is_jwt_blacklisted,
     verify_device_token,
 )
+from services.session import generate_title, update_user_memory
 from services.style_profiles import get_style_anchors
-from services.tts import synthesise_sentence
+from services.tts import flush_audio, pop_sentences, tts_bg
 
 _log = logging.getLogger(__name__)
 
-_SENT_RE = re.compile(r"(?<=[.!?।॥])\s")
-
-
-def _pop_sentences(buf: str) -> tuple[list[str], str]:
-    parts = _SENT_RE.split(buf)
-    if len(parts) <= 1:
-        return [], buf
-    return [p.strip() for p in parts[:-1] if p.strip()], parts[-1]
-
-
-async def _tts_bg(seq: int, text: str, lang: str, results: dict[int, bytes]) -> None:
-    try:
-        wav = await synthesise_sentence(text, lang, prepend_silence=(seq == 0))
-        results[seq] = wav
-    except Exception as e:
-        _log.warning("[voice_stream:tts] seq=%d failed: %r", seq, e)
-        results[seq] = b""
-
-
-def _flush_audio(
-    results: dict[int, bytes], next_seq: int
-) -> tuple[list[tuple[int, bytes]], int]:
-    ready: list[tuple[int, bytes]] = []
-    while next_seq in results:
-        ready.append((next_seq, results.pop(next_seq)))
-        next_seq += 1
-    return ready, next_seq
-
-
-async def _generate_title(session_id: str, user_input: str) -> None:
-    try:
-        title = await haiku_call(
-            f'Generate a concise 3-5 word title for a conversation that started with: "{user_input}". '
-            "Return ONLY the title, no quotes, no punctuation at the end."
-        )
-        title = title.strip().strip('"').strip("'")[:80]
-        if title:
-            await queries.update_session_title(session_id, title)
-    except Exception as e:
-        _log.warning("[voice_stream] title generation failed for %s: %r", session_id, e)
-
-
-async def _update_user_memory(user_id: str, user_input: str, rgv_response: str) -> None:
-    """Post-turn: Haiku summarizes the exchange and upserts user_memory for Super Fan."""
-    try:
-        existing = await queries.get_user_memory(user_id)
-        existing_summary = existing["summary"] if existing else ""
-        existing_facts = existing["key_facts"] if existing else {}
-
-        prompt = (
-            f"Existing memory summary:\n{existing_summary or '(none yet)'}\n\n"
-            f"New exchange:\nUser: {user_input}\nRGV: {rgv_response}\n\n"
-            "Update the memory summary (2-4 sentences, first-person about the user) and extract/update "
-            "key facts as a JSON object with string keys. "
-            "Return ONLY valid JSON: {\"summary\": \"...\", \"key_facts\": {...}}"
-        )
-        raw = await haiku_call(prompt)
-        raw = raw.strip()
-        import json as _json
-        if raw.startswith("```"):
-            raw = raw.split("```")[1].lstrip("json").strip()
-        data = _json.loads(raw)
-        summary = str(data.get("summary", existing_summary))[:2000]
-        key_facts = data.get("key_facts", existing_facts)
-        if not isinstance(key_facts, dict):
-            key_facts = existing_facts
-        await queries.upsert_user_memory(user_id, summary, key_facts)
-    except Exception as e:
-        _log.warning("[voice_stream] user_memory update failed for %s: %r", user_id, e)
+router = APIRouter(prefix="/voice", tags=["voice"])
 
 
 async def _resolve_user(token: str | None) -> dict | None:
@@ -116,9 +48,6 @@ async def _resolve_user(token: str | None) -> dict | None:
         return payload
     except jwt.PyJWTError:
         return None
-
-
-router = APIRouter(prefix="/voice", tags=["voice"])
 
 
 @router.websocket("/stream")
@@ -354,13 +283,13 @@ async def voice_stream(
             await _send({"type": "token", "text": token_text})
 
             sentence_buf += token_text
-            sentences, sentence_buf = _pop_sentences(sentence_buf)
+            sentences, sentence_buf = pop_sentences(sentence_buf)
             for sentence in sentences:
-                t = asyncio.create_task(_tts_bg(tts_seq, sentence, lang, audio_results))
+                t = asyncio.create_task(tts_bg(tts_seq, sentence, lang, audio_results, prepend_silence=(tts_seq == 0)))
                 tts_tasks.append(t)
                 tts_seq += 1
 
-            ready, next_emit = _flush_audio(audio_results, next_emit)
+            ready, next_emit = flush_audio(audio_results, next_emit)
             for seq, wav in ready:
                 if wav:
                     if t_first_audio is None:
@@ -374,13 +303,13 @@ async def voice_stream(
 
         # Flush tail sentence
         if sentence_buf.strip():
-            t = asyncio.create_task(_tts_bg(tts_seq, sentence_buf.strip(), lang, audio_results))
+            t = asyncio.create_task(tts_bg(tts_seq, sentence_buf.strip(), lang, audio_results))
             tts_tasks.append(t)
             tts_seq += 1
 
         if tts_tasks:
             await asyncio.gather(*tts_tasks, return_exceptions=True)
-            ready, next_emit = _flush_audio(audio_results, next_emit)
+            ready, next_emit = flush_audio(audio_results, next_emit)
             for seq, wav in ready:
                 if wav:
                     if t_first_audio is None:
@@ -394,7 +323,6 @@ async def voice_stream(
 
     except Exception as e:
         pipeline_error = e
-        # Cancel any remaining TTS tasks on failure
         for t in tts_tasks:
             t.cancel()
         if tts_tasks:
@@ -422,7 +350,6 @@ async def voice_stream(
     turn_seconds = estimate_turn_duration(full_response)
     tokens_used = usage_out.get("input_tokens", 0) + usage_out.get("output_tokens", 0)
 
-    # Append to Redis history (fast, awaited)
     await session_svc.append_turn(session_id, transcript, full_response)
 
     if user_id:
@@ -438,9 +365,9 @@ async def voice_stream(
             turn_id=preallocated_turn_id,
         ))
         if is_first_turn:
-            asyncio.create_task(_generate_title(session_id, transcript))
+            asyncio.create_task(generate_title(session_id, transcript, lang))
         if tier == "super_fan":
-            asyncio.create_task(_update_user_memory(user_id, transcript, full_response))
+            asyncio.create_task(update_user_memory(user_id, transcript, full_response))
 
     log_turn(
         source="ws",

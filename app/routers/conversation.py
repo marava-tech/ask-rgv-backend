@@ -2,7 +2,6 @@ import asyncio
 import base64
 import json
 import logging
-import re
 import time
 import uuid as _uuid
 from datetime import datetime, timezone
@@ -23,79 +22,25 @@ from models.schemas import (
     UsageRequest,
 )
 from services import session as session_svc
-from services.claude import haiku_call, sonnet_stream
+from services.claude import sonnet_stream
 from services.crisis import detect_crisis, get_safety_response
 from services.intent import classify_intent
 from services.language import detect_language, get_session_language, set_session_language
 from services.prompt import assemble_prompt, estimate_turn_duration
 from services.qdrant_search import search_chunks
 from services.quota import add_quota_usage, get_quota_remaining, get_tier_limit_seconds, verify_device_token
+from services.session import generate_title
 from services.style_profiles import get_style_anchors
 from services.metrics import log_turn
-from services.tts import synthesise_sentence
+from services.tts import flush_audio, pop_sentences, tts_bg
 
 _log = logging.getLogger(__name__)
-
-# Sentence boundary: split after [.!?।॥] followed by whitespace.
-# Lookbehind keeps the terminator with the preceding sentence.
-_SENT_RE = re.compile(r'(?<=[.!?।॥])\s')
-
-
-def _pop_sentences(buf: str) -> tuple[list[str], str]:
-    """Split buf on sentence boundaries; return (complete sentences, remaining tail)."""
-    parts = _SENT_RE.split(buf)
-    if len(parts) <= 1:
-        return [], buf
-    return [p.strip() for p in parts[:-1] if p.strip()], parts[-1]
-
-
-async def _tts_bg(seq: int, text: str, lang: str, results: dict[int, bytes]) -> None:
-    try:
-        wav = await synthesise_sentence(text, lang)
-        results[seq] = wav
-    except Exception as e:
-        _log.warning("[tts_bg] seq=%d failed: %r", seq, e)
-        results[seq] = b""
-
-
-def _flush_audio(results: dict[int, bytes], next_seq: int) -> tuple[list[tuple[int, bytes]], int]:
-    """Drain audio_results in monotonic order, returning ready (seq, wav) pairs."""
-    ready: list[tuple[int, bytes]] = []
-    while next_seq in results:
-        ready.append((next_seq, results.pop(next_seq)))
-        next_seq += 1
-    return ready, next_seq
-
 
 router = APIRouter(prefix="/conversation", tags=["conversation"])
 
 
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
-
-
-async def _generate_title(session_id: str, user_input: str) -> None:
-    try:
-        title = await haiku_call(
-            f'Generate a concise 3-5 word title for a conversation that started with: "{user_input}". '
-            'Return ONLY the title, no quotes, no punctuation at the end.'
-        )
-        title = title.strip().strip('"').strip("'")[:80]
-        if title:
-            await queries.update_session_title(session_id, title)
-    except Exception as e:
-        _log.warning("[title] generation failed for session %s: %r", session_id, e)
-
-
-@router.post("/start", response_model=StartSessionResponse)
-async def start_session(body: StartSessionRequest, user: dict | None = Depends(get_current_user)):
-    user_id = user["sub"] if user else None
-    session_id = await queries.create_session(user_id, body.device_id)
-    return StartSessionResponse(session=SessionData(
-        id=session_id,
-        mode=body.mode,
-        started_at=datetime.now(timezone.utc).isoformat(),
-    ))
 
 
 def _resolve_device_id(device_token: str | None, device_id: str | None) -> tuple[str | None, bool]:
@@ -110,6 +55,17 @@ def _resolve_device_id(device_token: str | None, device_id: str | None) -> tuple
         _log.warning("[security] unverified device_id used (old client) — consider upgrading")
         return device_id, False
     return None, False
+
+
+@router.post("/start", response_model=StartSessionResponse)
+async def start_session(body: StartSessionRequest, user: dict | None = Depends(get_current_user)):
+    user_id = user["sub"] if user else None
+    session_id = await queries.create_session(user_id, body.device_id)
+    return StartSessionResponse(session=SessionData(
+        id=session_id,
+        mode=body.mode,
+        started_at=datetime.now(timezone.utc).isoformat(),
+    ))
 
 
 @router.post("/turn")
@@ -227,16 +183,14 @@ async def conversation_turn(request: Request, body: TurnRequest, user: dict | No
                         full_response += token
                         yield _sse("token", {"text": token})
 
-                        # Accumulate into sentence buffer; fire TTS when sentence completes.
                         sentence_buf += token
-                        sentences, sentence_buf = _pop_sentences(sentence_buf)
+                        sentences, sentence_buf = pop_sentences(sentence_buf)
                         for sentence in sentences:
-                            t = asyncio.create_task(_tts_bg(tts_seq, sentence, lang, audio_results))
+                            t = asyncio.create_task(tts_bg(tts_seq, sentence, lang, audio_results))
                             tts_tasks.append(t)
                             tts_seq += 1
 
-                        # Non-blocking drain: emit any TTS chunks that are already ready.
-                        ready, next_emit = _flush_audio(audio_results, next_emit)
+                        ready, next_emit = flush_audio(audio_results, next_emit)
                         for seq, wav in ready:
                             if wav:
                                 if t_first_audio is None:
@@ -257,7 +211,6 @@ async def conversation_turn(request: Request, body: TurnRequest, user: dict | No
                     await asyncio.sleep(0.3)
 
             if stream_error:
-                # Cancel any in-flight TTS tasks to avoid leaking Smallest.ai calls
                 for t in tts_tasks:
                     t.cancel()
                 if tts_tasks:
@@ -268,16 +221,14 @@ async def conversation_turn(request: Request, body: TurnRequest, user: dict | No
                 yield _sse("error", {"code": "STREAM_ERROR"})
                 return
 
-            # Flush any remaining text as one last TTS chunk.
             if sentence_buf.strip():
-                t = asyncio.create_task(_tts_bg(tts_seq, sentence_buf.strip(), lang, audio_results))
+                t = asyncio.create_task(tts_bg(tts_seq, sentence_buf.strip(), lang, audio_results))
                 tts_tasks.append(t)
                 tts_seq += 1
 
-            # Wait for all in-flight TTS tasks, then emit remaining chunks in order.
             if tts_tasks:
                 await asyncio.gather(*tts_tasks, return_exceptions=True)
-                ready, next_emit = _flush_audio(audio_results, next_emit)
+                ready, next_emit = flush_audio(audio_results, next_emit)
                 for seq, wav in ready:
                     if wav:
                         if t_first_audio is None:
@@ -294,11 +245,9 @@ async def conversation_turn(request: Request, body: TurnRequest, user: dict | No
             turn_seconds = estimate_turn_duration(full_response)
             tokens_used = usage_out.get("input_tokens", 0) + usage_out.get("output_tokens", 0)
 
-            # Append to Redis history (fast, keep awaited).
             await session_svc.append_turn(body.session_id, body.message, full_response)
 
             if user_id:
-                # Return pre-allocated turn_id immediately — PG write is fire-and-forget.
                 yield _sse("turn_id", {"id": preallocated_turn_id})
                 asyncio.create_task(queries.store_turn(
                     session_id=body.session_id,
@@ -312,7 +261,7 @@ async def conversation_turn(request: Request, body: TurnRequest, user: dict | No
                     rag_context=rag_context,
                 ))
                 if is_first_turn:
-                    asyncio.create_task(_generate_title(body.session_id, body.message))
+                    asyncio.create_task(generate_title(body.session_id, body.message, lang))
 
             # C-1: voice turns charged by /voice/tts; only charge here for text-only turns.
             if body.source == "text":

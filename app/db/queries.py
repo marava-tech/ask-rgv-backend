@@ -710,16 +710,18 @@ async def list_admin_users(limit: int = 100, offset: int = 0) -> list[dict]:
             u.display_name,
             u.tier,
             u.created_at,
-            COALESCE(sess.total_sessions, 0)::int    AS total_sessions,
-            COALESCE(sess.total_tokens,   0)::bigint AS total_tokens,
-            sess.last_active                          AS last_active,
-            sub.current_period_end                    AS subscription_expires
+            COALESCE(sess.total_sessions,      0)::int    AS total_sessions,
+            COALESCE(sess.total_tokens,        0)::bigint AS total_tokens,
+            COALESCE(sess.total_audio_seconds, 0)::int    AS total_audio_seconds,
+            sess.last_active                               AS last_active,
+            sub.current_period_end                         AS subscription_expires
         FROM users u
         LEFT JOIN LATERAL (
             SELECT
-                COUNT(DISTINCT s.id)       AS total_sessions,
-                SUM(t.tokens_used)         AS total_tokens,
-                MAX(s.started_at)          AS last_active
+                COUNT(DISTINCT s.id)                     AS total_sessions,
+                SUM(t.tokens_used)                       AS total_tokens,
+                MAX(s.started_at)                        AS last_active,
+                COALESCE(SUM(t.audio_played_seconds), 0) AS total_audio_seconds
             FROM sessions s
             LEFT JOIN turns t ON t.session_id = s.id
             WHERE s.user_id = u.id
