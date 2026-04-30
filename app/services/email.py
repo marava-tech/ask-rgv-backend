@@ -164,7 +164,7 @@ async def send_waitlist_confirmation(name: str, email: str, app_code: str, merch
         return
 
     first_name = name.split()[0] if name else name
-    subject = f"You're in. Here are your codes, {first_name}."
+    subject = f"ASK-RGV-AI : You're in. Here are your codes, {first_name}."
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
