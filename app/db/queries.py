@@ -264,24 +264,27 @@ async def store_turn(
     session_id: str, mode: str, user_input: str, response: str,
     tokens_used: int, latency_ms: int, rag_chunks_used: int,
     turn_id: str | None = None,
+    rag_context: list | None = None,
 ) -> None:
+    import json as _json
     pool = get_pool()
+    rag_context_json = _json.dumps(rag_context) if rag_context else None
     if turn_id:
         await pool.execute(
             """
-            INSERT INTO turns (id, session_id, mode, user_input, response, tokens_used, latency_ms, rag_chunks_used)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO turns (id, session_id, mode, user_input, response, tokens_used, latency_ms, rag_chunks_used, rag_context)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
             ON CONFLICT (id) DO NOTHING
             """,
-            UUID(turn_id), UUID(session_id), mode, user_input, response, tokens_used, latency_ms, rag_chunks_used,
+            UUID(turn_id), UUID(session_id), mode, user_input, response, tokens_used, latency_ms, rag_chunks_used, rag_context_json,
         )
     else:
         await pool.execute(
             """
-            INSERT INTO turns (session_id, mode, user_input, response, tokens_used, latency_ms, rag_chunks_used)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO turns (session_id, mode, user_input, response, tokens_used, latency_ms, rag_chunks_used, rag_context)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
             """,
-            UUID(session_id), mode, user_input, response, tokens_used, latency_ms, rag_chunks_used,
+            UUID(session_id), mode, user_input, response, tokens_used, latency_ms, rag_chunks_used, rag_context_json,
         )
     await pool.execute(
         "UPDATE sessions SET turn_count = turn_count + 1 WHERE id = $1",
@@ -319,6 +322,66 @@ async def get_session_turns(
         UUID(session_id), limit, before,
     )
     return [dict(r) for r in reversed(rows)]
+
+
+async def get_admin_conversations(limit: int = 50) -> list[dict]:
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT s.id AS session_id,
+               COALESCE(u.email, 'anonymous') AS user_identifier,
+               s.language,
+               s.turn_count,
+               s.started_at,
+               s.session_title
+        FROM sessions s
+        LEFT JOIN users u ON s.user_id = u.id
+        ORDER BY s.started_at DESC
+        LIMIT $1
+        """,
+        limit,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_admin_conversation_detail(session_id: str) -> dict | None:
+    pool = get_pool()
+    session_row = await pool.fetchrow(
+        """
+        SELECT s.id AS session_id,
+               COALESCE(u.email, 'anonymous') AS user_identifier,
+               s.language,
+               s.turn_count,
+               s.started_at,
+               s.session_title
+        FROM sessions s
+        LEFT JOIN users u ON s.user_id = u.id
+        WHERE s.id = $1
+        """,
+        UUID(session_id),
+    )
+    if not session_row:
+        return None
+    turn_rows = await pool.fetch(
+        """
+        SELECT user_input, response, rag_chunks_used, rag_context, created_at, latency_ms, tokens_used
+        FROM turns
+        WHERE session_id = $1
+        ORDER BY created_at ASC
+        """,
+        UUID(session_id),
+    )
+    import json as _json
+    turns = []
+    for r in turn_rows:
+        t = dict(r)
+        if t.get("rag_context") and isinstance(t["rag_context"], str):
+            try:
+                t["rag_context"] = _json.loads(t["rag_context"])
+            except Exception:
+                pass
+        turns.append(t)
+    return {"session": dict(session_row), "turns": turns}
 
 
 # ── Subscriptions ─────────────────────────────────────────────────────────────
@@ -647,13 +710,20 @@ async def list_admin_users(limit: int = 100, offset: int = 0) -> list[dict]:
             u.display_name,
             u.tier,
             u.created_at,
-            COUNT(DISTINCT s.id)::int               AS total_sessions,
-            COALESCE(SUM(t.tokens_used), 0)::bigint AS total_tokens,
-            MAX(s.started_at)                        AS last_active,
-            sub.current_period_end                   AS subscription_expires
+            COALESCE(sess.total_sessions, 0)::int    AS total_sessions,
+            COALESCE(sess.total_tokens,   0)::bigint AS total_tokens,
+            sess.last_active                          AS last_active,
+            sub.current_period_end                    AS subscription_expires
         FROM users u
-        LEFT JOIN sessions s ON s.user_id = u.id
-        LEFT JOIN turns    t ON t.session_id = s.id
+        LEFT JOIN LATERAL (
+            SELECT
+                COUNT(DISTINCT s.id)       AS total_sessions,
+                SUM(t.tokens_used)         AS total_tokens,
+                MAX(s.started_at)          AS last_active
+            FROM sessions s
+            LEFT JOIN turns t ON t.session_id = s.id
+            WHERE s.user_id = u.id
+        ) sess ON true
         LEFT JOIN LATERAL (
             SELECT current_period_end
             FROM subscriptions
@@ -661,7 +731,6 @@ async def list_admin_users(limit: int = 100, offset: int = 0) -> list[dict]:
             ORDER BY current_period_end DESC
             LIMIT 1
         ) sub ON true
-        GROUP BY u.id, sub.current_period_end
         ORDER BY u.created_at DESC
         LIMIT $1 OFFSET $2
         """,

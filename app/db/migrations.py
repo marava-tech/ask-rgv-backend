@@ -27,8 +27,25 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 """
 
 
+_MIGRATION_LOCK = 7_469_272  # unique advisory lock key for ask-rgv migration runner
+
+
 async def run_pending(pool: asyncpg.Pool) -> int:
     """Run all unapplied migrations in order. Returns count of newly applied migrations."""
+    async with pool.acquire() as lock_conn:
+        locked = await lock_conn.fetchval(
+            "SELECT pg_try_advisory_lock($1)", _MIGRATION_LOCK
+        )
+        if not locked:
+            _log.info("[migrations] another worker holds migration lock — skipping")
+            return 0
+        try:
+            return await _run_migrations(pool)
+        finally:
+            await lock_conn.execute("SELECT pg_advisory_unlock($1)", _MIGRATION_LOCK)
+
+
+async def _run_migrations(pool: asyncpg.Pool) -> int:
     await pool.execute(_CREATE_TRACKING)
 
     files = sorted(_MIGRATIONS_DIR.glob("*.sql"))
