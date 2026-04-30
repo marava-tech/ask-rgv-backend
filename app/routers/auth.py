@@ -12,8 +12,9 @@ from core.auth import (
 )
 from core.config import settings
 from db import queries
-from models.schemas import GoogleAuthRequest, LogoutRequest, RefreshRequest, TokenResponse, UpdateMeRequest, UserInfo
-from services.quota import blacklist_jwt, is_jwt_blacklisted
+from db.queries import invalidate_token_family
+from models.schemas import DeviceTokenRequest, DeviceTokenResponse, GoogleAuthRequest, LogoutRequest, RefreshRequest, TokenResponse, UpdateMeRequest, UserInfo
+from services.quota import blacklist_jwt, is_jwt_blacklisted, sign_device_id
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -56,13 +57,26 @@ async def google_auth(body: GoogleAuthRequest):
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh(body: RefreshRequest):
+    import logging
+    _log = logging.getLogger(__name__)
+
     hashed = hash_token(body.refresh_token)
     row = await queries.consume_refresh_token(hashed)
+
     if not row:
-        # B-11: distinguish expired tokens so Flutter can show a user-friendly "please sign in again" message
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error": "refresh_expired", "message": "Your session has expired — please sign in again"},
+        )
+
+    if row.get("replayed"):
+        # Token reuse detected: someone is replaying a previously consumed refresh token.
+        # Invalidate the entire token family to force re-login for all devices in this chain.
+        _log.warning("[auth] refresh token replay detected for family %s", row.get("token_family"))
+        await invalidate_token_family(row["token_family"])
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": "token_reuse_detected", "message": "Security alert: please sign in again"},
         )
 
     user_id = str(row["user_id"])
@@ -85,7 +99,8 @@ async def refresh(body: RefreshRequest):
 
     access_token = create_access_token(user_id, user["tier"])
     raw_refresh, hashed_refresh, expires = generate_refresh_token()
-    await queries.store_refresh_token(user_id, hashed_refresh, expires)
+    # Continue the same token family so a future replay can be traced and invalidated.
+    await queries.store_refresh_token(user_id, hashed_refresh, expires, family=row["token_family"])
 
     return TokenResponse(
         access_token=access_token,
@@ -148,3 +163,19 @@ async def logout(body: LogoutRequest, user: dict = Depends(require_user)):
         await queries.delete_refresh_token_by_hash(hashed)
     else:
         await queries.delete_user_refresh_tokens(user["sub"])
+
+
+@router.post("/device", response_model=DeviceTokenResponse)
+async def register_device(body: DeviceTokenRequest):
+    """Issue a server-signed device token for anonymous quota tracking.
+
+    The client generates a UUID device_id locally, sends it here once, and
+    receives a signed token it must present on all subsequent anonymous requests.
+    This prevents forging arbitrary device_ids to claim fresh quota.
+    """
+    import re
+    # Validate the device_id is a well-formed UUID to limit entropy-farming.
+    if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", body.device_id):
+        raise HTTPException(status_code=400, detail="device_id must be a lowercase UUID v4")
+    device_token = sign_device_id(body.device_id)
+    return DeviceTokenResponse(device_id=body.device_id, device_token=device_token)
