@@ -29,7 +29,7 @@ from services.intent import classify_intent
 from services.language import detect_language, get_session_language, set_session_language
 from services.prompt import assemble_prompt, estimate_turn_duration
 from services.qdrant_search import search_chunks
-from services.quota import add_quota_usage, get_quota_remaining, get_tier_limit_seconds
+from services.quota import add_quota_usage, get_quota_remaining, get_tier_limit_seconds, verify_device_token
 from services.style_profiles import get_style_anchors
 from services.metrics import log_turn
 from services.tts import synthesise_sentence
@@ -98,13 +98,29 @@ async def start_session(body: StartSessionRequest, user: dict | None = Depends(g
     ))
 
 
+def _resolve_device_id(device_token: str | None, device_id: str | None) -> tuple[str | None, bool]:
+    """Return (resolved_device_id, is_verified). Prefers signed token over raw id."""
+    if device_token:
+        verified = verify_device_token(device_token)
+        if verified:
+            return verified, True
+        _log.warning("[security] invalid device_token presented — rejecting anonymous request")
+        return None, False
+    if device_id:
+        _log.warning("[security] unverified device_id used (old client) — consider upgrading")
+        return device_id, False
+    return None, False
+
+
 @router.post("/turn")
 async def conversation_turn(body: TurnRequest, user: dict | None = Depends(get_current_user)):
     user_id = user["sub"] if user else None
-    device_id = body.device_id
 
-    if not user_id and not device_id:
-        raise HTTPException(status_code=400, detail="device_id required for anonymous sessions")
+    device_id: str | None = None
+    if not user_id:
+        device_id, _ = _resolve_device_id(body.device_token, body.device_id)
+        if not device_id:
+            raise HTTPException(status_code=400, detail="device_token required for anonymous sessions")
 
     async def event_stream():
         try:

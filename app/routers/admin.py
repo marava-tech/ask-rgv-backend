@@ -461,3 +461,58 @@ async def update_bug_report(
     if not updated:
         raise HTTPException(status_code=404, detail="Bug report not found")
     return updated
+
+
+@router.get("/waitlist/signups", dependencies=[Depends(require_admin)])
+async def waitlist_signups(
+    limit: int = 100,
+    offset: int = 0,
+    search: str | None = None,
+):
+    pool = get_pool()
+    if search:
+        rows = await pool.fetch(
+            """
+            SELECT ws.id, ws.name, ws.email, ws.language, ws.is_rgv_fan,
+                   ws.app_promo_code, ws.merch_promo_code, ws.created_at,
+                   wmi.categories AS merch_interest
+            FROM waitlist_signups ws
+            LEFT JOIN waitlist_merch_interest wmi ON wmi.waitlist_id = ws.id
+            WHERE ws.name ILIKE $3 OR ws.email ILIKE $3
+            ORDER BY ws.created_at DESC
+            LIMIT $1 OFFSET $2
+            """,
+            limit,
+            offset,
+            f"%{search}%",
+        )
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT ws.id, ws.name, ws.email, ws.language, ws.is_rgv_fan,
+                   ws.app_promo_code, ws.merch_promo_code, ws.created_at,
+                   wmi.categories AS merch_interest
+            FROM waitlist_signups ws
+            LEFT JOIN waitlist_merch_interest wmi ON wmi.waitlist_id = ws.id
+            ORDER BY ws.created_at DESC
+            LIMIT $1 OFFSET $2
+            """,
+            limit,
+            offset,
+        )
+    return {"signups": [dict(r) for r in rows], "limit": limit, "offset": offset}
+
+
+@router.get("/waitlist/interests", dependencies=[Depends(require_admin)])
+async def waitlist_interests():
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT unnest(categories) AS category, count(*) AS cnt
+        FROM waitlist_merch_interest
+        GROUP BY category
+        """
+    )
+    counts = {r["category"]: r["cnt"] for r in rows}
+    categories = ["tshirt", "hoodie", "poster", "mug", "not_sure"]
+    return {cat: counts.get(cat, 0) for cat in categories}

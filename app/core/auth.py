@@ -30,11 +30,18 @@ async def verify_google_token(token: str) -> dict:
     )
 
 
+_APP_ISS = "ask-rgv"
+_APP_AUD = "ask-rgv-app"
+_ADMIN_AUD = "ask-rgv-admin"
+
+
 def create_access_token(user_id: str, tier: str) -> str:
     payload = {
         "sub": user_id,
         "tier": tier,
         "jti": str(uuid4()),
+        "iss": _APP_ISS,
+        "aud": _APP_AUD,
         "exp": datetime.now(UTC) + ACCESS_TOKEN_TTL,
         "iat": datetime.now(UTC),
     }
@@ -46,6 +53,8 @@ def create_admin_token() -> str:
         "sub": "admin",
         "role": "admin",
         "jti": str(uuid4()),
+        "iss": _APP_ISS,
+        "aud": _ADMIN_AUD,
         "exp": datetime.now(UTC) + ADMIN_ACCESS_TOKEN_TTL,
         "iat": datetime.now(UTC),
     }
@@ -64,11 +73,17 @@ def hash_token(raw: str) -> str:
 
 
 def decode_access_token(token: str) -> dict:
-    return jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+    return jwt.decode(
+        token, settings.jwt_secret, algorithms=["HS256"],
+        audience=_APP_AUD, issuer=_APP_ISS,
+    )
 
 
 def decode_admin_token(token: str) -> dict:
-    return jwt.decode(token, settings.admin_jwt_secret, algorithms=["HS256"])
+    return jwt.decode(
+        token, settings.admin_jwt_secret, algorithms=["HS256"],
+        audience=_ADMIN_AUD, issuer=_APP_ISS,
+    )
 
 
 async def get_current_user(
