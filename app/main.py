@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from core.config import settings
 from db.pool import close_pool, init_pool
-from routers import admin, auth, conversation, feedback, notifications, quotes, session, subscription, user, voice, voice_stream, waitlist
+from routers import admin, admin_merch, auth, conversation, feedback, merch, notifications, quotes, session, subscription, user, voice, voice_stream, waitlist, webhooks
 
 logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
@@ -222,6 +222,9 @@ app.include_router(notifications.router)
 app.include_router(quotes.router)
 app.include_router(admin.router)
 app.include_router(waitlist.router)
+app.include_router(merch.router)
+app.include_router(admin_merch.router)
+app.include_router(webhooks.router)
 app.include_router(voice.router)
 app.include_router(voice_stream.router)
 app.include_router(feedback.router)
