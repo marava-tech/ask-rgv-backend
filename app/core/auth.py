@@ -19,7 +19,7 @@ ACCESS_TOKEN_TTL = timedelta(hours=1)
 # exchanges refresh on use, this behaves as a rolling window — roughly “signed out after
 # this many days without a successful refresh” (inactivity from the app’s perspective).
 REFRESH_TOKEN_TTL = timedelta(days=7)
-ADMIN_ACCESS_TOKEN_TTL = timedelta(days=3)
+ADMIN_ACCESS_TOKEN_TTL = timedelta(days=7)
 
 
 async def verify_google_token(token: str) -> dict:

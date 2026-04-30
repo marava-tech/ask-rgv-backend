@@ -168,3 +168,90 @@ class BugReportRequest(BaseModel):
 class BugReportUpdateRequest(BaseModel):
     status: Literal["open", "in_progress", "resolved", "wont_fix"] | None = None
     admin_notes: str | None = Field(default=None, max_length=2000)
+
+
+# ── Merch ─────────────────────────────────────────────────────────────────────
+
+class MerchVariant(BaseModel):
+    id: str
+    label: str
+    sku: str
+
+
+class MerchProductCreate(BaseModel):
+    name: str
+    description: str | None = None
+    price_inr: int
+    image_url: str | None = None
+    variants: list[MerchVariant] = []
+
+
+class MerchProductUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    price_inr: int | None = None
+    image_url: str | None = None
+    variants: list[MerchVariant] | None = None
+    enabled: bool | None = None
+
+
+class MerchProductOut(BaseModel):
+    id: str
+    name: str
+    description: str | None = None
+    price_inr: int
+    image_url: str | None = None
+    variants: list[MerchVariant] = []
+    enabled: bool
+
+
+class ShippingAddress(BaseModel):
+    name: str
+    phone: str
+    address_line1: str
+    city: str
+    state: str
+    pincode: str
+    country: str = "India"
+
+
+class InitiateOrderRequest(BaseModel):
+    product_id: str
+    variant_id: str
+    promo_code: str | None = None
+
+
+class InitiateOrderResponse(BaseModel):
+    order_id: str
+    razorpay_order_id: str
+    amount: int
+    key_id: str
+
+
+class ConfirmOrderRequest(BaseModel):
+    order_id: str
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+    shipping_address: ShippingAddress
+
+
+class MerchOrderOut(BaseModel):
+    id: str
+    user_id: str
+    product_id: str
+    variant_id: str
+    amount_inr: int
+    original_amount_inr: int
+    promo_code: str | None = None
+    razorpay_order_id: str | None = None
+    razorpay_payment_id: str | None = None
+    status: str
+    shipping_address: dict | None = None
+    shiprocket_order_id: str | None = None
+    shiprocket_awb: str | None = None
+    shiprocket_status: str | None = None
+
+
+class MerchOrderUpdateRequest(BaseModel):
+    status: Literal["pending", "paid", "fulfilled", "delivered", "cancelled"] | None = None

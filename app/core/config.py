@@ -45,6 +45,18 @@ class Settings(BaseSettings):
     email_username: str = ""
     email_password: str = ""
 
+    # Merch + payments
+    razorpay_key_id: str = ""
+    razorpay_key_secret: str = ""
+    shiprocket_email: str = ""
+    shiprocket_password: str = ""
+    minio_endpoint: str = ""
+    minio_access_key: str = ""
+    minio_secret_key: str = ""
+    minio_merch_bucket: str = "merch-images"
+    minio_public_url: str = ""
+    waitlist_gate_enabled: bool = True
+
     # Phase 1 latency flags
     rag_rerank_enabled: bool = False   # Haiku rerank OFF by default — saves 300-700 ms/turn
     embed_cache_enabled: bool = True   # Redis embedding cache ON by default
