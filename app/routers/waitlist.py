@@ -11,6 +11,10 @@ from services.promo import generate_app_code, generate_merch_code
 router = APIRouter(prefix="/waitlist", tags=["waitlist"])
 
 
+class WaitlistCountResponse(BaseModel):
+    count: int
+
+
 class WaitlistJoinRequest(BaseModel):
     name: str
     email: EmailStr
@@ -22,6 +26,13 @@ class WaitlistJoinRequest(BaseModel):
 class WaitlistJoinResponse(BaseModel):
     app_promo_code: str
     merch_promo_code: str
+
+
+@router.get("/count", response_model=WaitlistCountResponse)
+async def get_waitlist_count():
+    pool = get_pool()
+    row = await pool.fetchrow("SELECT COUNT(*) AS count FROM waitlist_signups")
+    return WaitlistCountResponse(count=row["count"])
 
 
 @router.post("/join", response_model=WaitlistJoinResponse, status_code=status.HTTP_201_CREATED)
