@@ -28,10 +28,28 @@ async def upsert_user(google_id: str, email: str, display_name: str, avatar_url:
 async def get_user_by_id(user_id: str) -> dict | None:
     pool = get_pool()
     row = await pool.fetchrow(
-        "SELECT id, google_id, email, display_name, avatar_url, tier, preferred_language, preferred_name, created_at FROM users WHERE id = $1",
+        "SELECT id, google_id, email, display_name, avatar_url, tier, preferred_language, preferred_name, fcm_token, created_at FROM users WHERE id = $1",
         UUID(user_id),
     )
     return dict(row) if row else None
+
+
+async def update_user_fcm_token(user_id: str, fcm_token: str) -> None:
+    pool = get_pool()
+    await pool.execute("UPDATE users SET fcm_token = $1 WHERE id = $2", fcm_token, UUID(user_id))
+
+
+async def get_all_fcm_tokens(language: str | None = None) -> list[str]:
+    """Return distinct non-null FCM tokens, optionally filtered by preferred_language."""
+    pool = get_pool()
+    if language:
+        rows = await pool.fetch(
+            "SELECT DISTINCT fcm_token FROM users WHERE fcm_token IS NOT NULL AND preferred_language = $1",
+            language,
+        )
+    else:
+        rows = await pool.fetch("SELECT DISTINCT fcm_token FROM users WHERE fcm_token IS NOT NULL")
+    return [r["fcm_token"] for r in rows]
 
 
 async def update_user_tier(user_id: str, tier: str) -> None:

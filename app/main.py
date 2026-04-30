@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from core.config import settings
 from db.pool import close_pool, init_pool
-from routers import admin, auth, conversation, feedback, quotes, session, subscription, user, voice, voice_stream, waitlist
+from routers import admin, auth, conversation, feedback, notifications, quotes, session, subscription, user, voice, voice_stream, waitlist
 
 logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
@@ -96,9 +96,66 @@ async def _expire_subscriptions_with_lock():
     await _with_leader_lock("expire_subscriptions", _expire_subscriptions, ttl=43100)
 
 
-# Bug #14: quote-of-day scheduler only printed; no FCM implementation existed.
-# Bug #28: quotes weren't grouped by user language.
-# Removed until FCM + user device tokens are implemented (Phase 8).
+async def _daily_broadcast():
+    """Sends today's RGV provocation to all users who have registered an FCM token."""
+    from datetime import date
+    import httpx
+    import google.auth.transport.requests as google_requests
+    from google.oauth2 import service_account
+    from data.daily_provocations import DAILY_PROVOCATIONS
+    from db import queries
+
+    day_index = (date.today().timetuple().tm_yday - 1) % len(DAILY_PROVOCATIONS)
+    provocation = DAILY_PROVOCATIONS[day_index]
+
+    fcm_tokens = await queries.get_all_fcm_tokens()
+    if not fcm_tokens:
+        logger.info("[daily-broadcast] no FCM tokens, skipping")
+        return
+
+    try:
+        creds = service_account.Credentials.from_service_account_file(
+            settings.firebase_service_account_path,
+            scopes=["https://www.googleapis.com/auth/firebase.messaging"],
+        )
+        google_requests.Request()(creds)
+    except Exception as e:
+        logger.error("[daily-broadcast] Firebase credential load failed: %s", e)
+        return
+
+    sent = 0
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for token in fcm_tokens:
+            try:
+                resp = await client.post(
+                    "https://fcm.googleapis.com/v1/projects/askrgv/messages:send",
+                    headers={"Authorization": f"Bearer {creds.token}"},
+                    json={
+                        "message": {
+                            "token": token,
+                            "notification": {
+                                "title": "RGV has something to say.",
+                                "body": provocation,
+                            },
+                            "android": {
+                                "priority": "normal",
+                                "notification": {"click_action": "OPEN_CONVERSATION"},
+                            },
+                        }
+                    },
+                )
+                if resp.status_code == 200:
+                    sent += 1
+                else:
+                    logger.warning("[daily-broadcast] FCM rejected token: %s", resp.text[:200])
+            except Exception as e:
+                logger.warning("[daily-broadcast] send error: %s", e)
+
+    logger.info("[daily-broadcast] sent=%d/%d provocation_index=%d", sent, len(fcm_tokens), day_index)
+
+
+async def _daily_broadcast_with_lock():
+    await _with_leader_lock("daily_broadcast", _daily_broadcast, ttl=3590)
 
 
 @asynccontextmanager
@@ -112,7 +169,18 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_nightly_cleanup_with_lock, CronTrigger(hour=0, minute=0))
     scheduler.add_job(_cleanup_empty_sessions_with_lock, IntervalTrigger(hours=3))
     scheduler.add_job(_expire_subscriptions_with_lock, IntervalTrigger(hours=12))
+    scheduler.add_job(_daily_broadcast_with_lock, CronTrigger(hour=9, minute=0))
     scheduler.start()
+
+    # Load all AI prompts from DB into Redis so first conversation turn uses DB persona.
+    try:
+        from services.prompt_loader import PromptLoader
+        prompt_loader = PromptLoader()
+        await prompt_loader.load_all(get_pool())
+        app.state.prompt_loader = prompt_loader
+    except Exception as e:
+        logger.warning("[startup] prompt_loader init failed (non-fatal): %s", e)
+        app.state.prompt_loader = None
 
     # Pre-synthesize static phrases (crisis, greeting, thinking) so first playback is instant.
     try:
@@ -150,6 +218,7 @@ app.include_router(conversation.router)
 app.include_router(session.router)
 app.include_router(user.router)
 app.include_router(subscription.router)
+app.include_router(notifications.router)
 app.include_router(quotes.router)
 app.include_router(admin.router)
 app.include_router(waitlist.router)
