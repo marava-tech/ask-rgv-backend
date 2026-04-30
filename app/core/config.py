@@ -33,6 +33,7 @@ class Settings(BaseSettings):
 
     deepgram_api_key: str = ""
     smallest_ai_api_key: str = ""
+    tts_speed: float = 0.9
 
     firebase_service_account_path: str = "/app/firebase-service-account.json"
     app_env: str = "production"
