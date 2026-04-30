@@ -28,15 +28,22 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str
 
-    razorpay_key_id: str = ""
-    razorpay_key_secret: str = ""
-    razorpay_webhook_secret: str = ""
+    google_play_package_name: str = "tech.marava.askrgv"
+    google_service_account_json: str = ""  # path to service account JSON file
 
     deepgram_api_key: str = ""
     smallest_ai_api_key: str = ""
 
     firebase_service_account_path: str = "/app/firebase-service-account.json"
     app_env: str = "production"
+
+    # Email (waitlist confirmation)
+    email_enabled: bool = False
+    email_from: str = ""
+    email_host: str = "smtp.gmail.com"
+    email_port: int = 587
+    email_username: str = ""
+    email_password: str = ""
 
     # Phase 1 latency flags
     rag_rerank_enabled: bool = False   # Haiku rerank OFF by default — saves 300-700 ms/turn
@@ -56,10 +63,8 @@ class Settings(BaseSettings):
     # Bug #34: warn at boot when optional secrets are missing so failures aren't silent
     @model_validator(mode="after")
     def warn_missing_secrets(self) -> "Settings":
-        if not self.razorpay_key_id or not self.razorpay_key_secret:
-            logger.warning("[config] RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET not set — payments disabled")
-        if not self.razorpay_webhook_secret:
-            logger.warning("[config] RAZORPAY_WEBHOOK_SECRET not set — webhook endpoint will reject all events")
+        if not self.google_service_account_json:
+            logger.warning("[config] GOOGLE_SERVICE_ACCOUNT_JSON not set — Play IAP verification disabled")
         if not self.deepgram_api_key:
             logger.warning("[config] DEEPGRAM_API_KEY not set — STT disabled")
         if not self.smallest_ai_api_key:
