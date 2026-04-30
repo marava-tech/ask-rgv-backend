@@ -27,6 +27,7 @@ from services.quota import (
     get_quota_remaining,
     get_tier_limit_seconds,
     is_jwt_blacklisted,
+    verify_device_token,
 )
 from services.style_profiles import get_style_anchors
 from services.tts import synthesise_sentence
@@ -75,6 +76,35 @@ async def _generate_title(session_id: str, user_input: str) -> None:
         _log.warning("[voice_stream] title generation failed for %s: %r", session_id, e)
 
 
+async def _update_user_memory(user_id: str, user_input: str, rgv_response: str) -> None:
+    """Post-turn: Haiku summarizes the exchange and upserts user_memory for Super Fan."""
+    try:
+        existing = await queries.get_user_memory(user_id)
+        existing_summary = existing["summary"] if existing else ""
+        existing_facts = existing["key_facts"] if existing else {}
+
+        prompt = (
+            f"Existing memory summary:\n{existing_summary or '(none yet)'}\n\n"
+            f"New exchange:\nUser: {user_input}\nRGV: {rgv_response}\n\n"
+            "Update the memory summary (2-4 sentences, first-person about the user) and extract/update "
+            "key facts as a JSON object with string keys. "
+            "Return ONLY valid JSON: {\"summary\": \"...\", \"key_facts\": {...}}"
+        )
+        raw = await haiku_call(prompt)
+        raw = raw.strip()
+        import json as _json
+        if raw.startswith("```"):
+            raw = raw.split("```")[1].lstrip("json").strip()
+        data = _json.loads(raw)
+        summary = str(data.get("summary", existing_summary))[:2000]
+        key_facts = data.get("key_facts", existing_facts)
+        if not isinstance(key_facts, dict):
+            key_facts = existing_facts
+        await queries.upsert_user_memory(user_id, summary, key_facts)
+    except Exception as e:
+        _log.warning("[voice_stream] user_memory update failed for %s: %r", user_id, e)
+
+
 async def _resolve_user(token: str | None) -> dict | None:
     if not token:
         return None
@@ -97,6 +127,7 @@ async def voice_stream(
     session_id: str,
     mode: str = "default",
     device_id: str | None = None,
+    device_token: str | None = None,
     token: str | None = None,
     hint_language: str | None = None,  # validated below against known codes
 ) -> None:
@@ -137,6 +168,23 @@ async def voice_stream(
     user = await _resolve_user(token)
     user_id = user["sub"] if user else None
 
+    # Resolve device_id: prefer server-signed device_token over raw device_id.
+    resolved_device_id = device_id
+    if not user_id:
+        if device_token:
+            verified = verify_device_token(device_token)
+            if verified:
+                resolved_device_id = verified
+            else:
+                _log.warning("[voice_stream][security] invalid device_token — closing ws")
+                await ws.send_json({"type": "error", "message": "invalid_device_token"})
+                await ws.close()
+                return
+        elif not device_id:
+            await ws.send_json({"type": "error", "message": "device_token required for anonymous sessions"})
+            await ws.close()
+            return
+
     if user_id:
         user_data, lang = await asyncio.gather(
             queries.get_user_by_id(user_id),
@@ -148,7 +196,7 @@ async def voice_stream(
         user_data = None
         tier = "anonymous"
 
-    quota_remaining = await get_quota_remaining(user_id, device_id, tier)
+    quota_remaining = await get_quota_remaining(user_id, resolved_device_id, tier)
     if quota_remaining == 0:
         await ws.send_json({"type": "quota_exhausted", "tier": tier})
         await ws.close()
@@ -264,6 +312,13 @@ async def voice_stream(
     )
     is_first_turn = len(history) == 0
 
+    # Load persistent memory for Super Fan users
+    user_memories_text: str | None = None
+    if tier == "super_fan" and user_id:
+        mem = await queries.get_user_memory(user_id)
+        if mem and mem.get("summary"):
+            user_memories_text = mem["summary"]
+
     messages, system_blocks = assemble_prompt(
         intent=intent,
         history=history,
@@ -273,6 +328,7 @@ async def voice_stream(
         user_input=transcript,
         mode=mode,
         user_name=user_data.get("preferred_name") if user_data else None,
+        user_memories=user_memories_text,
     )
 
     preallocated_turn_id = str(_uuid.uuid4()) if user_id else None
@@ -348,7 +404,7 @@ async def voice_stream(
         if full_response:
             turn_seconds = estimate_turn_duration(full_response)
             limit = await get_tier_limit_seconds(tier)
-            new_used = await add_quota_usage(user_id, device_id, turn_seconds, limit)
+            new_used = await add_quota_usage(user_id, resolved_device_id, turn_seconds, limit)
             if limit != -1 and new_used >= limit:
                 await _send({"type": "quota_exhausted", "tier": tier})
 
@@ -382,6 +438,8 @@ async def voice_stream(
         ))
         if is_first_turn:
             asyncio.create_task(_generate_title(session_id, transcript))
+        if tier == "super_fan":
+            asyncio.create_task(_update_user_memory(user_id, transcript, full_response))
 
     log_turn(
         source="ws",

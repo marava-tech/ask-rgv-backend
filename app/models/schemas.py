@@ -46,10 +46,20 @@ class LogoutRequest(BaseModel):
     refresh_token: str | None = None
 
 
+class DeviceTokenRequest(BaseModel):
+    device_id: str
+
+
+class DeviceTokenResponse(BaseModel):
+    device_id: str
+    device_token: str
+
+
 # ── Conversation ──────────────────────────────────────────────────────────────
 
 class StartSessionRequest(BaseModel):
     device_id: str | None = None
+    device_token: str | None = None
     mode: str = "default"
 
 
@@ -70,6 +80,7 @@ class TurnRequest(BaseModel):
     message: str
     mode: Literal["default", "hard_truth", "argue"] = "default"
     device_id: str | None = None
+    device_token: str | None = None
     source: Literal["text", "voice"] = "text"
     # STT-detected language hint — takes priority over text-based detection for voice turns
     hint_language: Literal["en", "te", "hi"] | None = None
@@ -84,6 +95,7 @@ class UsageRequest(BaseModel):
     turn_id: str | None = None
     played_seconds: int = Field(ge=0, le=600)
     device_id: str | None = None
+    device_token: str | None = None
 
 
 class InterruptRequest(BaseModel):
@@ -91,6 +103,7 @@ class InterruptRequest(BaseModel):
     active_turn_id: str
     played_seconds: int = Field(ge=0, le=600)
     device_id: str | None = None
+    device_token: str | None = None
 
 
 class EndSessionRequest(BaseModel):
@@ -99,31 +112,24 @@ class EndSessionRequest(BaseModel):
 
 # ── Subscription ──────────────────────────────────────────────────────────────
 
-class CreateOrderRequest(BaseModel):
-    tier: Literal["fan", "super_fan"]
-    is_upgrade: bool = False
+class IAPVerifyRequest(BaseModel):
+    product_id: str
+    purchase_token: str
 
 
-class CreateOrderResponse(BaseModel):
-    order_id: str
-    amount: int
-    currency: str = "INR"
-    key_id: str
+class IAPVerifyResponse(BaseModel):
+    tier: str
+    success: bool
 
 
-class UpgradePriceResponse(BaseModel):
-    prorated_amount_paise: int
-    prorated_amount_rupees: int
-    remaining_days: int
-    period_end: str
-    fan_price_rupees: int = 99
-    super_fan_price_rupees: int = 299
-    discount_rupees: int
+class PackVerifyRequest(BaseModel):
+    product_id: Literal["ask_rgv_pack_5", "ask_rgv_pack_12"]
+    purchase_token: str
 
 
-class WebhookPayload(BaseModel):
-    event: str
-    payload: dict
+class PackVerifyResponse(BaseModel):
+    turns_credited: int
+    success: bool
 
 
 # ── Admin ingestion ───────────────────────────────────────────────────────────

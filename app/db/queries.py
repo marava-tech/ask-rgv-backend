@@ -59,35 +59,84 @@ async def update_user_preferences(user_id: str, preferred_language: str | None, 
 
 # ── Refresh tokens ────────────────────────────────────────────────────────────
 
-async def store_refresh_token(user_id: str, token_hash: str, expires_at: datetime) -> None:
+async def store_refresh_token(
+    user_id: str, token_hash: str, expires_at: datetime, family: str | None = None
+) -> str:
+    """Insert a refresh token and return its token_family UUID string.
+
+    Pass ``family`` to continue an existing rotation chain (on refresh).
+    Omit to start a new family (on login).
+    """
+    import uuid as _uuid
+    token_family = UUID(family) if family else _uuid.uuid4()
     pool = get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)",
-            UUID(user_id), token_hash, expires_at,
+            "INSERT INTO refresh_tokens (user_id, token_hash, expires_at, token_family) VALUES ($1, $2, $3, $4)",
+            UUID(user_id), token_hash, expires_at, token_family,
         )
-        # Bug #18: tokens accumulated unboundedly per user; cap at 10, delete oldest beyond that
+        # Cap active (unrevoked) tokens at 10 per user; delete oldest beyond that.
         await conn.execute(
             """
             DELETE FROM refresh_tokens WHERE id IN (
-                SELECT id FROM refresh_tokens WHERE user_id = $1
+                SELECT id FROM refresh_tokens
+                WHERE user_id = $1 AND revoked_at IS NULL
                 ORDER BY created_at DESC OFFSET 10
             )
             """,
             UUID(user_id),
         )
+        # Prune revoked tokens older than 30 days to keep the table lean.
+        await conn.execute(
+            "DELETE FROM refresh_tokens WHERE user_id = $1 AND revoked_at < now() - interval '30 days'",
+            UUID(user_id),
+        )
+    return str(token_family)
 
 
 async def consume_refresh_token(token_hash: str) -> dict | None:
+    """Mark a refresh token as revoked and return its metadata.
+
+    Returns:
+      ``{user_id, token_family}``             — valid token, successfully consumed.
+      ``{user_id, token_family, replayed: True}`` — token was already revoked (replay attack).
+      ``None``                                 — token not found or expired.
+    """
     pool = get_pool()
-    row = await pool.fetchrow(
-        """
-        DELETE FROM refresh_tokens WHERE token_hash = $1 AND expires_at > now()
-        RETURNING user_id
-        """,
-        token_hash,
-    )
-    return dict(row) if row else None
+    async with pool.acquire() as conn:
+        # Happy path: claim a valid, unrevoked, unexpired token.
+        row = await conn.fetchrow(
+            """
+            UPDATE refresh_tokens
+               SET revoked_at = now()
+             WHERE token_hash = $1
+               AND revoked_at IS NULL
+               AND expires_at > now()
+            RETURNING user_id, token_family
+            """,
+            token_hash,
+        )
+        if row:
+            return {"user_id": row["user_id"], "token_family": str(row["token_family"])}
+
+        # Detect replay: token exists but was already revoked.
+        revoked = await conn.fetchrow(
+            "SELECT user_id, token_family FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NOT NULL",
+            token_hash,
+        )
+        if revoked:
+            return {
+                "user_id": revoked["user_id"],
+                "token_family": str(revoked["token_family"]),
+                "replayed": True,
+            }
+    return None
+
+
+async def invalidate_token_family(family: str) -> None:
+    """Delete all refresh tokens belonging to a family (used on replay detection)."""
+    pool = get_pool()
+    await pool.execute("DELETE FROM refresh_tokens WHERE token_family = $1", UUID(family))
 
 
 async def delete_user_refresh_tokens(user_id: str) -> None:
@@ -260,7 +309,7 @@ async def get_active_subscription(user_id: str) -> dict | None:
     pool = get_pool()
     row = await pool.fetchrow(
         """
-        SELECT id, user_id, tier, status, razorpay_order_id, razorpay_payment_id,
+        SELECT id, user_id, tier, status, google_purchase_token, subscription_period,
                current_period_end, created_at, updated_at
         FROM subscriptions
         WHERE user_id = $1 AND status = 'active' AND current_period_end > now()
@@ -271,55 +320,97 @@ async def get_active_subscription(user_id: str) -> dict | None:
     return dict(row) if row else None
 
 
-async def get_subscription_by_order_id(order_id: str) -> dict | None:
+async def activate_iap_subscription(
+    user_id: str,
+    tier: str,
+    purchase_token: str,
+    product_id: str,
+    subscription_period: str,
+    expiry_time_millis: str | None,
+) -> dict | None:
+    """Activate or renew a subscription via Google Play IAP token. Atomic: updates subscriptions + users."""
+    from datetime import timedelta
     pool = get_pool()
-    row = await pool.fetchrow(
-        "SELECT id, user_id, tier, status, expected_amount_paise FROM subscriptions WHERE razorpay_order_id = $1",
-        order_id,
-    )
+    days = 366 if subscription_period == "annual" else 31
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                WITH upserted AS (
+                    INSERT INTO subscriptions
+                        (user_id, tier, google_purchase_token, product_id, subscription_period,
+                         status, current_period_end)
+                    VALUES ($1, $2, $3, $4, $5, 'active', now() + $6::interval)
+                    ON CONFLICT (google_purchase_token) DO UPDATE
+                        SET status = 'active',
+                            tier = EXCLUDED.tier,
+                            subscription_period = EXCLUDED.subscription_period,
+                            current_period_end = EXCLUDED.current_period_end,
+                            updated_at = now()
+                    RETURNING user_id, tier
+                )
+                UPDATE users SET tier = upserted.tier
+                FROM upserted WHERE users.id = upserted.user_id
+                RETURNING upserted.user_id AS user_id, upserted.tier AS tier
+                """,
+                UUID(user_id), tier, purchase_token, product_id, subscription_period,
+                f"{days} days",
+            )
     return dict(row) if row else None
 
 
-async def create_subscription_order(
-    user_id: str, tier: str, order_id: str, expected_amount_paise: int | None = None
-) -> str:
-    pool = get_pool()
-    row = await pool.fetchrow(
-        """
-        INSERT INTO subscriptions (user_id, tier, razorpay_order_id, status, expected_amount_paise)
-        VALUES ($1, $2, $3, 'pending', $4)
-        RETURNING id
-        """,
-        UUID(user_id), tier, order_id, expected_amount_paise,
-    )
-    return str(row["id"])
-
-
-async def activate_subscription_and_update_tier(payment_id: str, order_id: str) -> dict | None:
-    """Activate a pending subscription and update the user's tier in one atomic transaction."""
+async def activate_iap_subscription_by_token(
+    purchase_token: str,
+    tier: str,
+    product_id: str,
+    subscription_period: str,
+    expiry_time_millis: str | None,
+) -> dict | None:
+    """Renew/activate by token (from RTDN webhook — no user_id needed, token identifies subscription)."""
+    days = 366 if subscription_period == "annual" else 31
     pool = get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
                 """
-                WITH activated AS (
+                WITH updated AS (
                     UPDATE subscriptions
                     SET status = 'active',
-                        razorpay_payment_id = $1,
-                        current_period_end = GREATEST(COALESCE(current_period_end, now()), now()) + interval '30 days',
+                        tier = $2,
+                        subscription_period = $3,
+                        current_period_end = now() + $4::interval,
                         updated_at = now()
-                    WHERE razorpay_order_id = $2 AND status = 'pending'
+                    WHERE google_purchase_token = $1
                     RETURNING user_id, tier
                 )
-                UPDATE users
-                SET tier = activated.tier
-                FROM activated
-                WHERE users.id = activated.user_id
-                RETURNING activated.user_id AS user_id, activated.tier AS tier
+                UPDATE users SET tier = updated.tier
+                FROM updated WHERE users.id = updated.user_id
+                RETURNING updated.user_id AS user_id, updated.tier AS tier
                 """,
-                payment_id, order_id,
+                purchase_token, tier, subscription_period, f"{days} days",
             )
     return dict(row) if row else None
+
+
+async def expire_subscription_by_token(purchase_token: str) -> None:
+    """Mark a subscription as expired by purchase token (from RTDN cancel/expire event)."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                WITH expired AS (
+                    UPDATE subscriptions
+                    SET status = 'expired', updated_at = now()
+                    WHERE google_purchase_token = $1 AND status = 'active'
+                    RETURNING user_id
+                )
+                UPDATE users SET tier = 'seeker'
+                WHERE id IN (SELECT user_id FROM expired)
+                  AND tier IN ('fan', 'super_fan')
+                """,
+                purchase_token,
+            )
 
 
 async def expire_ended_subscriptions() -> int:
@@ -341,7 +432,7 @@ async def expire_ended_subscriptions() -> int:
                     RETURNING user_id
                 )
                 UPDATE users
-                   SET tier = 'free'
+                   SET tier = 'seeker'
                  WHERE id IN (SELECT user_id FROM expired)
                    AND tier IN ('fan', 'super_fan')
                 """
@@ -503,11 +594,26 @@ async def get_admin_stats() -> dict:
     avg_latency = await pool.fetchval(
         "SELECT AVG(latency_ms) FROM turns WHERE latency_ms IS NOT NULL AND created_at > now() - interval '7 days'"
     )
+    # Memory coverage: % of Super Fan users with non-empty memory summary
+    memory_row = await pool.fetchrow(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE u.tier = 'super_fan')::int AS super_fan_count,
+            COUNT(*) FILTER (WHERE u.tier = 'super_fan' AND m.summary IS NOT NULL AND m.summary != '')::int AS memory_count
+        FROM users u
+        LEFT JOIN user_memory m ON m.user_id = u.id
+        """
+    )
+    super_fan_count = memory_row["super_fan_count"] or 0
+    memory_count = memory_row["memory_count"] or 0
+    memory_coverage_pct = round(memory_count / super_fan_count * 100) if super_fan_count > 0 else None
     return {
         "active_users_today": active_users,
         "total_sessions": total_sessions,
         "total_turns": total_turns,
         "avg_latency_ms": round(avg_latency) if avg_latency else None,
+        "super_fan_count": super_fan_count,
+        "memory_coverage_pct": memory_coverage_pct,
     }
 
 
@@ -674,3 +780,91 @@ async def update_bug_report(
         *params,
     )
     return dict(row) if row else None
+
+
+# ── Quota Packs ───────────────────────────────────────────────────────────────
+
+async def is_pack_token_used(purchase_token: str) -> bool:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT id FROM quota_packs WHERE purchase_token = $1", purchase_token
+    )
+    return row is not None
+
+
+async def credit_quota_pack(
+    user_id: str, product_id: str, purchase_token: str, turns: int
+) -> None:
+    pool = get_pool()
+    await pool.execute(
+        """
+        INSERT INTO quota_packs (user_id, product_id, purchase_token, turns_remaining)
+        VALUES ($1, $2, $3, $4)
+        """,
+        UUID(user_id), product_id, purchase_token, turns,
+    )
+
+
+async def consume_pack_turn(user_id: str) -> bool:
+    """Consume one pack turn for a user (oldest pack first). Returns True if consumed."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT id FROM quota_packs
+                WHERE user_id = $1 AND turns_remaining > 0
+                ORDER BY purchased_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+                """,
+                UUID(user_id),
+            )
+            if not row:
+                return False
+            await conn.execute(
+                "UPDATE quota_packs SET turns_remaining = turns_remaining - 1 WHERE id = $1",
+                row["id"],
+            )
+    return True
+
+
+async def get_pack_turns_remaining(user_id: str) -> int:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT COALESCE(SUM(turns_remaining), 0) AS total FROM quota_packs WHERE user_id = $1",
+        UUID(user_id),
+    )
+    return int(row["total"]) if row else 0
+
+
+# ── User Memory ───────────────────────────────────────────────────────────────
+
+async def get_user_memory(user_id: str) -> dict | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT user_id, summary, key_facts, updated_at FROM user_memory WHERE user_id = $1",
+        UUID(user_id),
+    )
+    return dict(row) if row else None
+
+
+async def upsert_user_memory(user_id: str, summary: str, key_facts: dict) -> None:
+    import json as _json
+    pool = get_pool()
+    await pool.execute(
+        """
+        INSERT INTO user_memory (user_id, summary, key_facts, updated_at)
+        VALUES ($1, $2, $3::jsonb, now())
+        ON CONFLICT (user_id) DO UPDATE
+            SET summary = EXCLUDED.summary,
+                key_facts = EXCLUDED.key_facts,
+                updated_at = now()
+        """,
+        UUID(user_id), summary, _json.dumps(key_facts),
+    )
+
+
+async def delete_user_memory(user_id: str) -> None:
+    pool = get_pool()
+    await pool.execute("DELETE FROM user_memory WHERE user_id = $1", UUID(user_id))

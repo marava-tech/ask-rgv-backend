@@ -1,22 +1,55 @@
+import hmac
+import hashlib
 import time
 from datetime import date, datetime, timezone, timedelta
 
 import redis.asyncio as aioredis
 from core.config import settings
 
+# ── Device token signing ───────────────────────────────────────────────────────
+# Prevents anonymous users from forging arbitrary device_ids to claim fresh quota.
+# Format: "{device_id}.{hmac_hex}" — HMAC keyed with jwt_secret + ":device" salt.
+
+def _device_hmac_key() -> bytes:
+    return (settings.jwt_secret + ":device").encode()
+
+
+def sign_device_id(device_id: str) -> str:
+    """Return a server-signed device token for the given device_id."""
+    sig = hmac.new(_device_hmac_key(), device_id.encode(), hashlib.sha256).hexdigest()
+    return f"{device_id}.{sig}"
+
+
+def verify_device_token(token: str) -> str | None:
+    """Verify a device token and return the device_id, or None if invalid."""
+    if not token or "." not in token:
+        return None
+    # Split on the LAST dot so device_ids that happen to contain dots still work.
+    last_dot = token.rfind(".")
+    device_id = token[:last_dot]
+    sig = token[last_dot + 1:]
+    if not device_id:
+        return None
+    expected = hmac.new(_device_hmac_key(), device_id.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        return None
+    return device_id
+
 _redis: aioredis.Redis | None = None
 
 # Fallback limits (seconds/week) used only when app_config is unavailable
 _DEFAULT_TIER_LIMITS = {
-    "anonymous": 300,
-    "free": 300,
-    "fan": 3600,
-    "super_fan": -1,
+    "anonymous": 180,   # 3 voice turns × 60s
+    "free": 180,        # legacy alias — existing DB rows still say 'free'
+    "seeker": 180,      # 3 voice turns per day
+    "fan": 3600,        # 60 minutes per day
+    "super_fan": -1,    # unlimited
 }
 
 _TIER_CONFIG_KEYS = {
     "anonymous": "anonymous_weekly_credits",
     "free": "free_weekly_credits",
+    "seeker": "free_weekly_credits",  # shares same config key as 'free'
     "fan": "fan_weekly_credits",
     "super_fan": "super_fan_weekly_credits",
 }
@@ -68,8 +101,14 @@ def get_redis() -> aioredis.Redis:
     return _redis
 
 
-def _quota_key(user_id: str | None, device_id: str | None) -> str:
+def _quota_key(user_id: str | None, device_id: str | None, tier: str = "") -> str:
     today = date.today()
+    if tier in ("seeker", "free", "anonymous"):
+        # Seeker quota resets daily (3 turns/day)
+        day_key = today.strftime("%Y%m%d")
+        if user_id:
+            return f"quota:{user_id}:day:{day_key}"
+        return f"quota:anon:{device_id}:day:{day_key}"
     iso = today.isocalendar()
     week_key = f"{iso.year}W{iso.week:02d}"
     if user_id:
@@ -130,25 +169,33 @@ async def get_quota_remaining(user_id: str | None, device_id: str | None, tier: 
     if limit == -1:
         return -1
     r = get_redis()
-    used = int(await r.get(_quota_key(user_id, device_id)) or 0)
+    used = int(await r.get(_quota_key(user_id, device_id, tier)) or 0)
     return max(0, limit - used)
 
 
 async def add_quota_usage(
-    user_id: str | None, device_id: str | None, seconds: int, limit: int = -1
+    user_id: str | None, device_id: str | None, seconds: int, limit: int = -1, tier: str = ""
 ) -> int:
     """Add usage seconds atomically, capped at limit (-1 = unlimited). Returns new total used."""
     r = get_redis()
-    key = _quota_key(user_id, device_id)
-    ttl = _seconds_until_week_end_ist()
+    key = _quota_key(user_id, device_id, tier)
+    ttl = _seconds_until_midnight_ist() if tier in ("seeker", "free", "anonymous") else _seconds_until_week_end_ist()
     new_total = await r.eval(_QUOTA_INCRBY_LUA, 1, key, seconds, limit, ttl)
     return int(new_total)
 
 
-async def delete_quota_key(user_id: str) -> None:
-    """Delete the current week's quota key for a user (used by admin reset-quota)."""
+async def try_consume_pack_turn(user_id: str | None) -> bool:
+    """For Seeker users: consume one pack turn before falling back to daily quota. Returns True if consumed."""
+    if not user_id:
+        return False
+    from db import queries
+    return await queries.consume_pack_turn(user_id)
+
+
+async def delete_quota_key(user_id: str, tier: str = "fan") -> None:
+    """Delete the quota key for a user (used by admin reset-quota)."""
     r = get_redis()
-    await r.delete(_quota_key(user_id, None))
+    await r.delete(_quota_key(user_id, None, tier))
 
 
 async def blacklist_jwt(jti: str, ttl_seconds: int) -> None:
