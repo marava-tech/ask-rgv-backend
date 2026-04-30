@@ -12,7 +12,7 @@ from core.auth import (
 )
 from core.config import settings
 from db import queries
-from db.queries import invalidate_token_family
+from db.queries import invalidate_token_family, get_waitlist_by_email
 from models.schemas import DeviceTokenRequest, DeviceTokenResponse, GoogleAuthRequest, LogoutRequest, RefreshRequest, TokenResponse, UpdateMeRequest, UserInfo
 from services.quota import blacklist_jwt, is_jwt_blacklisted, sign_device_id
 
@@ -26,6 +26,14 @@ async def google_auth(body: GoogleAuthRequest):
         info = await verify_google_token(body.id_token)
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Google token")
+
+    if settings.waitlist_gate_enabled:
+        waitlist_row = await get_waitlist_by_email(info["email"])
+        if not waitlist_row:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "not_on_waitlist", "message": "Early access only"},
+            )
 
     user = await queries.upsert_user(
         google_id=info["sub"],

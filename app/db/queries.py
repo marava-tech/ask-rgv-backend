@@ -955,3 +955,253 @@ async def upsert_user_memory(user_id: str, summary: str, key_facts: dict) -> Non
 async def delete_user_memory(user_id: str) -> None:
     pool = get_pool()
     await pool.execute("DELETE FROM user_memory WHERE user_id = $1", UUID(user_id))
+
+
+# ── Waitlist ───────────────────────────────────────────────────────────────────
+
+async def get_waitlist_by_email(email: str) -> dict | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT id FROM waitlist_signups WHERE LOWER(email) = LOWER($1)",
+        email,
+    )
+    return dict(row) if row else None
+
+
+async def get_waitlist_by_promo_code(promo_code: str) -> dict | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT id FROM waitlist_signups WHERE merch_promo_code = $1 AND merch_code_redeemed_at IS NULL",
+        promo_code,
+    )
+    return dict(row) if row else None
+
+
+async def redeem_merch_promo_code(promo_code: str) -> None:
+    pool = get_pool()
+    await pool.execute(
+        "UPDATE waitlist_signups SET merch_code_redeemed_at = NOW() WHERE merch_promo_code = $1",
+        promo_code,
+    )
+
+
+# ── Merch Products ─────────────────────────────────────────────────────────────
+
+async def list_merch_products(enabled_only: bool = True) -> list[dict]:
+    import json as _json
+    pool = get_pool()
+    if enabled_only:
+        rows = await pool.fetch(
+            "SELECT id, name, description, price_inr, image_url, variants, enabled FROM merch_products WHERE enabled = true ORDER BY created_at ASC"
+        )
+    else:
+        rows = await pool.fetch(
+            "SELECT id, name, description, price_inr, image_url, variants, enabled FROM merch_products ORDER BY created_at ASC"
+        )
+    result = []
+    for row in rows:
+        d = dict(row)
+        d["id"] = str(d["id"])
+        if isinstance(d["variants"], str):
+            d["variants"] = _json.loads(d["variants"])
+        result.append(d)
+    return result
+
+
+async def get_merch_product(product_id: str) -> dict | None:
+    import json as _json
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT id, name, description, price_inr, image_url, variants, enabled FROM merch_products WHERE id = $1",
+        UUID(product_id),
+    )
+    if not row:
+        return None
+    d = dict(row)
+    d["id"] = str(d["id"])
+    if isinstance(d["variants"], str):
+        d["variants"] = _json.loads(d["variants"])
+    return d
+
+
+async def create_merch_product(name: str, description: str | None, price_inr: int, image_url: str | None, variants: list) -> dict:
+    import json as _json
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO merch_products (name, description, price_inr, image_url, variants)
+        VALUES ($1, $2, $3, $4, $5::jsonb)
+        RETURNING id, name, description, price_inr, image_url, variants, enabled
+        """,
+        name, description, price_inr, image_url, _json.dumps(variants),
+    )
+    d = dict(row)
+    d["id"] = str(d["id"])
+    if isinstance(d["variants"], str):
+        d["variants"] = _json.loads(d["variants"])
+    return d
+
+
+async def update_merch_product(product_id: str, updates: dict) -> dict | None:
+    import json as _json
+    pool = get_pool()
+    sets = []
+    vals = []
+    i = 1
+    for key, val in updates.items():
+        if key == "variants":
+            sets.append(f"variants = ${i}::jsonb")
+            vals.append(_json.dumps(val))
+        else:
+            sets.append(f"{key} = ${i}")
+            vals.append(val)
+        i += 1
+    if not sets:
+        return await get_merch_product(product_id)
+    vals.append(UUID(product_id))
+    row = await pool.fetchrow(
+        f"UPDATE merch_products SET {', '.join(sets)} WHERE id = ${i} RETURNING id, name, description, price_inr, image_url, variants, enabled",
+        *vals,
+    )
+    if not row:
+        return None
+    d = dict(row)
+    d["id"] = str(d["id"])
+    if isinstance(d["variants"], str):
+        d["variants"] = _json.loads(d["variants"])
+    return d
+
+
+# ── Merch Orders ──────────────────────────────────────────────────────────────
+
+async def create_merch_order(
+    user_id: str, product_id: str, variant_id: str,
+    amount_inr: int, original_amount_inr: int, promo_code: str | None,
+    razorpay_order_id: str,
+) -> dict:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO merch_orders
+          (user_id, product_id, variant_id, amount_inr, original_amount_inr, promo_code, razorpay_order_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id, user_id, product_id, variant_id, amount_inr, original_amount_inr,
+                  promo_code, razorpay_order_id, status
+        """,
+        UUID(user_id), UUID(product_id), variant_id, amount_inr,
+        original_amount_inr, promo_code, razorpay_order_id,
+    )
+    d = dict(row)
+    d["id"] = str(d["id"])
+    d["user_id"] = str(d["user_id"])
+    d["product_id"] = str(d["product_id"])
+    return d
+
+
+async def get_merch_order(order_id: str) -> dict | None:
+    import json as _json
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT id, user_id, product_id, variant_id, amount_inr, original_amount_inr,
+               promo_code, razorpay_order_id, razorpay_payment_id, status,
+               shipping_address, shiprocket_order_id, shiprocket_awb, shiprocket_status
+        FROM merch_orders WHERE id = $1
+        """,
+        UUID(order_id),
+    )
+    if not row:
+        return None
+    d = dict(row)
+    d["id"] = str(d["id"])
+    d["user_id"] = str(d["user_id"])
+    d["product_id"] = str(d["product_id"])
+    if isinstance(d.get("shipping_address"), str):
+        d["shipping_address"] = _json.loads(d["shipping_address"])
+    return d
+
+
+async def get_merch_order_by_shiprocket_id(shiprocket_order_id: str) -> dict | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT id FROM merch_orders WHERE shiprocket_order_id = $1",
+        shiprocket_order_id,
+    )
+    return dict(row) if row else None
+
+
+async def confirm_merch_order(order_id: str, razorpay_payment_id: str, shipping_address: dict) -> None:
+    import json as _json
+    pool = get_pool()
+    await pool.execute(
+        """
+        UPDATE merch_orders
+        SET status = 'paid', razorpay_payment_id = $1, shipping_address = $2::jsonb, updated_at = NOW()
+        WHERE id = $3
+        """,
+        razorpay_payment_id, _json.dumps(shipping_address), UUID(order_id),
+    )
+
+
+async def fulfill_merch_order(order_id: str, shiprocket_order_id: str, shiprocket_awb: str) -> None:
+    pool = get_pool()
+    await pool.execute(
+        """
+        UPDATE merch_orders
+        SET status = 'fulfilled', shiprocket_order_id = $1, shiprocket_awb = $2, updated_at = NOW()
+        WHERE id = $3
+        """,
+        shiprocket_order_id, shiprocket_awb, UUID(order_id),
+    )
+
+
+async def update_merch_order_status(order_id: str, status: str, shiprocket_status: str | None = None) -> None:
+    pool = get_pool()
+    await pool.execute(
+        """
+        UPDATE merch_orders
+        SET status = $1, shiprocket_status = $2, updated_at = NOW()
+        WHERE id = $3
+        """,
+        status, shiprocket_status, UUID(order_id),
+    )
+
+
+async def update_merch_order_by_shiprocket_id(shiprocket_order_id: str, status: str, shiprocket_status: str) -> None:
+    pool = get_pool()
+    await pool.execute(
+        """
+        UPDATE merch_orders
+        SET status = $1, shiprocket_status = $2, updated_at = NOW()
+        WHERE shiprocket_order_id = $3
+        """,
+        status, shiprocket_status, shiprocket_order_id,
+    )
+
+
+async def list_merch_orders() -> list[dict]:
+    import json as _json
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT o.id, o.user_id, o.product_id, o.variant_id, o.amount_inr, o.original_amount_inr,
+               o.promo_code, o.razorpay_order_id, o.razorpay_payment_id, o.status,
+               o.shipping_address, o.shiprocket_order_id, o.shiprocket_awb, o.shiprocket_status,
+               o.created_at, u.email as user_email, p.name as product_name
+        FROM merch_orders o
+        JOIN users u ON o.user_id = u.id
+        JOIN merch_products p ON o.product_id = p.id
+        ORDER BY o.created_at DESC
+        """
+    )
+    result = []
+    for row in rows:
+        d = dict(row)
+        d["id"] = str(d["id"])
+        d["user_id"] = str(d["user_id"])
+        d["product_id"] = str(d["product_id"])
+        d["created_at"] = d["created_at"].isoformat()
+        if isinstance(d.get("shipping_address"), str):
+            d["shipping_address"] = _json.loads(d["shipping_address"])
+        result.append(d)
+    return result
