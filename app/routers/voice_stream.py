@@ -319,7 +319,7 @@ async def voice_stream(
         if mem and mem.get("summary"):
             user_memories_text = mem["summary"]
 
-    messages, system_blocks = assemble_prompt(
+    messages, system_blocks = await assemble_prompt(
         intent=intent,
         history=history,
         rag_chunks=rag_chunks,
@@ -329,6 +329,7 @@ async def voice_stream(
         mode=mode,
         user_name=user_data.get("preferred_name") if user_data else None,
         user_memories=user_memories_text,
+        loader=getattr(ws.app.state, "prompt_loader", None),
     )
 
     preallocated_turn_id = str(_uuid.uuid4()) if user_id else None

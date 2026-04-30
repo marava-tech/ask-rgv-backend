@@ -1,4 +1,11 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from services.session import MAX_HISTORY_TURNS
+
+if TYPE_CHECKING:
+    from services.prompt_loader import PromptLoader
 
 SYSTEM_PERSONA = """You are Ram Gopal Varma (RGV) — the Indian filmmaker known for challenging conventional thinking.
 
@@ -37,14 +44,38 @@ Your job this turn is to be pure opposition. Behavior overrides:
 - Never agree. Never validate. Never comfort.
 - 3 to 6 questions per turn. Short. Sharp. No preamble."""
 
+_DEFAULT_MODE_PROMPT = """
+[MODE: DEFAULT]
+You are RGV in a structured conversation. Behavior for this turn:
+- Challenge the user's reasoning, not just their feelings. Find the weakest link in what they said and target it.
+- You may soften the landing slightly — not to comfort them, but to make your point land harder. Blunt is not always the sharpest.
+- Use rhetorical questions as your primary weapon. One strong question beats three assertions.
+- When referencing your films, career, or views, speak from specific experience — not abstract philosophy.
+- Stay under 120 words. Every sentence must earn its place. Padding is a sign of unclear thinking."""
+
 _MODE_PROMPTS: dict[str, str] = {
-    "default": "",
+    "default": _DEFAULT_MODE_PROMPT,
     "hard_truth": _HARD_TRUTH_MODE_PROMPT,
     "argue": _ARGUE_MODE_PROMPT,
 }
 
+# Maps intent classifier output to prompt_configs DB keys
+_INTENT_KEY_MAP: dict[str, str] = {
+    "venting": "intent_venting",
+    "seeking_validation": "intent_validation",
+    "debating": "intent_debating",
+    "seeking_clarity": "intent_clarity",
+}
 
-def assemble_prompt(
+# Maps mode names to prompt_configs DB keys (None = use _DEFAULT_MODE_PROMPT fallback constant)
+_MODE_KEY_MAP: dict[str, str | None] = {
+    "default": None,
+    "hard_truth": "hard_truth_mode",
+    "argue": "argue_mode",
+}
+
+
+async def assemble_prompt(
     intent: str,
     history: list[dict],
     rag_chunks: list[dict],
@@ -54,6 +85,7 @@ def assemble_prompt(
     mode: str,
     user_memories: str | None = None,
     user_name: str | None = None,
+    loader: PromptLoader | None = None,
 ) -> tuple[list[dict], list[dict]]:
     rag_text = ""
     if rag_chunks:
@@ -62,13 +94,23 @@ def assemble_prompt(
             c["payload"].get("text", "")[:500] for c in rag_chunks[:3]
         )
 
-    approach = INTENT_APPROACHES.get(intent, INTENT_APPROACHES["seeking_clarity"])
-    mode_note = _MODE_PROMPTS.get(mode, "")
+    # Resolve persona and mode prompts via DB loader, or fall back to hardcoded constants
+    if loader is not None:
+        persona = await loader.get("system_persona")
+        intent_key = _INTENT_KEY_MAP.get(intent, "intent_clarity")
+        approach = await loader.get(intent_key)
+        mode_db_key = _MODE_KEY_MAP.get(mode)
+        mode_note = (await loader.get(mode_db_key)) if mode_db_key else _MODE_PROMPTS.get(mode, "")
+    else:
+        persona = SYSTEM_PERSONA
+        approach = INTENT_APPROACHES.get(intent, INTENT_APPROACHES["seeking_clarity"])
+        mode_note = _MODE_PROMPTS.get(mode, "")
+
     lang_note = f"\n[Respond in: {'Telugu' if language == 'te' else 'Hindi' if language == 'hi' else 'English'}]"
     memory_block = f"\n\n[USER_MEMORY]\n{user_memories}" if user_memories else ""
     name_note = f"\n[The user's name is {user_name}. Address them as {user_name} naturally in your responses.]" if user_name else ""
 
-    static_system = SYSTEM_PERSONA
+    static_system = persona
     if style_anchors:
         static_system += f"\n\n{style_anchors}"
 
