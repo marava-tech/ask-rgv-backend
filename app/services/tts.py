@@ -1,9 +1,11 @@
+import asyncio
 import io
 import logging
 import re
 import wave
-import asyncio
+
 import httpx
+
 from core.config import settings
 
 _log = logging.getLogger(__name__)
@@ -23,6 +25,47 @@ _http_client = httpx.AsyncClient(
 )
 
 _SEMAPHORE = asyncio.Semaphore(5)
+
+# ── Sentence-streaming helpers (shared by conversation and voice_stream routers) ──
+
+SENT_RE = re.compile(r"(?<=[.!?।॥])\s")
+
+
+def pop_sentences(buf: str) -> tuple[list[str], str]:
+    """Split buf on sentence boundaries; return (complete sentences, remaining tail)."""
+    parts = SENT_RE.split(buf)
+    if len(parts) <= 1:
+        return [], buf
+    return [p.strip() for p in parts[:-1] if p.strip()], parts[-1]
+
+
+def flush_audio(
+    results: dict[int, bytes], next_seq: int
+) -> tuple[list[tuple[int, bytes]], int]:
+    """Drain audio_results in monotonic order, returning ready (seq, wav) pairs."""
+    ready: list[tuple[int, bytes]] = []
+    while next_seq in results:
+        ready.append((next_seq, results.pop(next_seq)))
+        next_seq += 1
+    return ready, next_seq
+
+
+async def tts_bg(
+    seq: int,
+    text: str,
+    lang: str,
+    results: dict[int, bytes],
+    prepend_silence: bool = False,
+) -> None:
+    try:
+        wav = await synthesise_sentence(text, lang, prepend_silence=prepend_silence)
+        results[seq] = wav
+    except Exception as e:
+        _log.warning("[tts_bg] seq=%d failed: %r", seq, e)
+        results[seq] = b""
+
+
+# ── Internal synthesis helpers ────────────────────────────────────────────────
 
 
 def _split_chunks(text: str, limit: int = _TTS_CHAR_LIMIT) -> list[str]:
@@ -116,7 +159,7 @@ async def _synthesise_chunk(text: str, voice_id: str) -> bytes:
                 "text": text,
                 "voice_id": voice_id,
                 "sample_rate": 24000,
-                "speed": 1.0,
+                "speed": settings.tts_speed,
                 "output_format": "wav",
             },
         )
@@ -125,8 +168,11 @@ async def _synthesise_chunk(text: str, voice_id: str) -> bytes:
         return response.content
 
 
+# ── Public synthesis API ──────────────────────────────────────────────────────
+
+
 async def synthesise_sentence(text: str, language: str, prepend_silence: bool = False) -> bytes:
-    """Synthesize a single pre-split sentence for streaming TTS. Uses module-level client."""
+    """Synthesize a single pre-split sentence for streaming TTS."""
     text = _normalize_for_tts(_strip_markdown(text))
     if not text:
         return b""
