@@ -595,3 +595,174 @@ async def get_prompt_history(key: str):
         key,
     )
     return [dict(r) for r in rows]
+
+
+# ── Ingestion Chunk Inspector ─────────────────────────────────────────────────
+
+@router.get("/ingestion/{video_id}/chunks", dependencies=[Depends(require_admin)])
+async def list_ingestion_chunks(video_id: str):
+    from core.config import settings as _settings
+    qdrant_url = f"{_settings.qdrant_url}/collections/{_settings.qdrant_collection}/points/scroll"
+    payload = {
+        "filter": {"must": [{"key": "video_id", "match": {"value": video_id}}]},
+        "limit": 100,
+        "with_payload": True,
+        "with_vector": False,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(qdrant_url, json=payload)
+            r.raise_for_status()
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Qdrant unreachable: {type(e).__name__}")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"Qdrant error: {e.response.status_code}")
+
+    points = r.json().get("result", {}).get("points", [])
+    chunks = [
+        {
+            "point_id": str(p["id"]),
+            "text_preview": p["payload"].get("text", "")[:400],
+            "quality_score": p["payload"].get("quality_score", 0.0),
+            "enabled": p["payload"].get("enabled", True),
+        }
+        for p in points
+    ]
+    chunks.sort(key=lambda c: c["quality_score"], reverse=True)
+    return chunks
+
+
+@router.patch("/ingestion/{video_id}/chunks/{point_id}/toggle", dependencies=[Depends(require_admin)])
+async def toggle_ingestion_chunk(video_id: str, point_id: str, body: ToggleRequest):
+    from core.config import settings as _settings
+    qdrant_url = f"{_settings.qdrant_url}/collections/{_settings.qdrant_collection}/points/payload"
+    payload = {
+        "payload": {"enabled": body.enabled},
+        "points": [point_id],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(qdrant_url, json=payload)
+            r.raise_for_status()
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Qdrant unreachable: {type(e).__name__}")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"Qdrant error: {e.response.status_code}")
+    return {"point_id": point_id, "enabled": body.enabled}
+
+
+# ── Style Profile Extraction ──────────────────────────────────────────────────
+
+@router.post("/style-profiles/extract/{video_id}", dependencies=[Depends(require_admin)], status_code=202)
+async def extract_style_profiles(video_id: str):
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT id FROM ingestion_log WHERE video_id = $1 AND status = 'complete'",
+        video_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Video not found or not complete")
+    from services.style_profile_extraction import extract_style_profiles_for_video
+    asyncio.create_task(extract_style_profiles_for_video(video_id))
+    return {"status": "started", "video_id": video_id}
+
+
+# ── Ad-hoc RAG Search ─────────────────────────────────────────────────────────
+
+@router.post("/rag/search", dependencies=[Depends(require_admin)])
+async def admin_rag_search(body: dict):
+    query = (body.get("query") or "").strip()
+    if not query:
+        raise HTTPException(status_code=422, detail="query must not be empty")
+    video_id_filter = body.get("video_id")
+    limit = min(int(body.get("limit") or 10), 20)
+
+    from services.embedding import embed_query
+    try:
+        embedding = await embed_query(query)
+    except Exception:
+        raise HTTPException(status_code=503, detail="Embedding service unavailable")
+
+    from core.config import settings as _settings
+    search_url = f"{_settings.qdrant_url}/collections/{_settings.qdrant_collection}/points/search"
+
+    must_filters: list[dict] = [{"key": "enabled", "match": {"value": True}}]
+    if video_id_filter:
+        must_filters.append({"key": "video_id", "match": {"value": video_id_filter}})
+    qdrant_filter = {"must": must_filters}
+
+    dense_payload = {
+        "vector": {"name": "dense", "vector": embedding["dense"]},
+        "filter": qdrant_filter,
+        "limit": limit,
+        "with_payload": True,
+    }
+    sparse_payload = {
+        "vector": {
+            "name": "sparse",
+            "vector": {
+                "indices": [int(i) for i in embedding["sparse"]["indices"]],
+                "values": embedding["sparse"]["values"],
+            },
+        },
+        "filter": qdrant_filter,
+        "limit": limit,
+        "with_payload": True,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            dense_r, sparse_r = await asyncio.gather(
+                client.post(search_url, json=dense_payload),
+                client.post(search_url, json=sparse_payload),
+            )
+            dense_r.raise_for_status()
+            sparse_r.raise_for_status()
+    except httpx.RequestError:
+        raise HTTPException(status_code=503, detail="Qdrant unreachable")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"Qdrant error: {e.response.status_code}")
+
+    dense_results = dense_r.json().get("result", [])
+    sparse_results = sparse_r.json().get("result", [])
+
+    # RRF fusion
+    scores: dict[str, float] = {}
+    payloads: dict[str, dict] = {}
+    k = 60
+    for rank, item in enumerate(dense_results):
+        pid = str(item["id"])
+        scores[pid] = scores.get(pid, 0) + 1 / (k + rank + 1)
+        payloads[pid] = item["payload"]
+    for rank, item in enumerate(sparse_results):
+        pid = str(item["id"])
+        scores[pid] = scores.get(pid, 0) + 1 / (k + rank + 1)
+        payloads.setdefault(pid, item["payload"])
+
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:limit]
+    return [
+        {
+            "point_id": pid,
+            "text": payloads[pid].get("text", ""),
+            "video_id": payloads[pid].get("video_id"),
+            "source_title": payloads[pid].get("source_title"),
+            "qdrant_score": round(score, 4),
+        }
+        for pid, score in ranked
+    ]
+
+
+# ── Conversations Admin ───────────────────────────────────────────────────────
+
+@router.get("/conversations", dependencies=[Depends(require_admin)])
+async def list_conversations():
+    sessions = await queries.get_admin_conversations(limit=50)
+    return sessions
+
+
+@router.get("/conversations/{session_id}", dependencies=[Depends(require_admin)])
+async def get_conversation(session_id: str):
+    detail = await queries.get_admin_conversation_detail(session_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return detail

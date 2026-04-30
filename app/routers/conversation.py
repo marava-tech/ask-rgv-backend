@@ -170,6 +170,16 @@ async def conversation_turn(request: Request, body: TurnRequest, user: dict | No
                 classify_intent(body.message),
             )
 
+            rag_context = [
+                {
+                    "chunk_id": str(c["id"]),
+                    "video_id": c["payload"].get("video_id"),
+                    "text_snippet": c["payload"].get("text", "")[:300],
+                    "qdrant_score": round(float(c["score"]), 4),
+                }
+                for c in rag_chunks[:3]
+            ] or None
+
             is_first_turn = (len(history) == 0)
 
             messages, system_blocks = await assemble_prompt(
@@ -299,6 +309,7 @@ async def conversation_turn(request: Request, body: TurnRequest, user: dict | No
                     latency_ms=latency_ms,
                     rag_chunks_used=len(rag_chunks),
                     turn_id=preallocated_turn_id,
+                    rag_context=rag_context,
                 ))
                 if is_first_turn:
                     asyncio.create_task(_generate_title(body.session_id, body.message))
