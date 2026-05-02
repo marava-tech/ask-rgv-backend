@@ -16,6 +16,18 @@ class UserInfo(BaseModel):
     tier: str
     preferred_language: Literal["te", "hi", "en"] | None = None
     preferred_name: str | None = None
+    current_streak: int = 0
+    longest_streak: int = 0
+    last_active_date: str | None = None
+    unlocked_themes: list[str] = Field(default_factory=lambda: ["default"])
+
+class GamificationActivityResponse(BaseModel):
+    current_streak: int
+    longest_streak: int
+    streak_updated: bool
+
+class ThemeUnlockRequest(BaseModel):
+    theme_id: str
 
 
 class UpdateMeRequest(BaseModel):
