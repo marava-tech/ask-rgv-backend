@@ -300,6 +300,8 @@ async def voice_stream(
                         "b64": base64.b64encode(wav).decode(),
                         "mime": "audio/wav",
                     })
+                else:
+                    await _send({"type": "error", "code": "TTS_FAILED"})
 
         # Flush tail sentence
         if sentence_buf.strip():
@@ -320,6 +322,8 @@ async def voice_stream(
                         "b64": base64.b64encode(wav).decode(),
                         "mime": "audio/wav",
                     })
+                else:
+                    await _send({"type": "error", "code": "TTS_FAILED"})
 
     except Exception as e:
         pipeline_error = e

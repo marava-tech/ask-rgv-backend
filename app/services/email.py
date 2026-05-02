@@ -3,7 +3,6 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 import aiosmtplib
-
 from core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -159,7 +158,9 @@ def _build_html(name: str, app_code: str, merch_code: str) -> str:
 </html>"""
 
 
-async def send_waitlist_confirmation(name: str, email: str, app_code: str, merch_code: str) -> None:
+async def send_waitlist_confirmation(
+    name: str, email: str, app_code: str, merch_code: str
+) -> None:
     if not settings.email_enabled:
         return
 

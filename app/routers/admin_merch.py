@@ -1,7 +1,7 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from core.auth import require_admin
 from core.config import settings
@@ -94,8 +94,8 @@ async def admin_image_upload_url(filename: str, _=Depends(require_admin)):
 # ── Orders ────────────────────────────────────────────────────────────────────
 
 @router.get("/orders")
-async def admin_list_orders(_=Depends(require_admin)):
-    orders = await queries.list_merch_orders()
+async def admin_list_orders(status: str | None = Query(None), _=Depends(require_admin)):
+    orders = await queries.list_merch_orders(status=status)
     return {"orders": orders}
 
 
