@@ -1,7 +1,9 @@
+import asyncio
 import hashlib
 import hmac
 import logging
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from core.auth import require_user
@@ -11,10 +13,44 @@ from models.schemas import (
     ConfirmOrderRequest,
     InitiateOrderRequest,
     InitiateOrderResponse,
+    PromoValidateResponse,
 )
+from services import shiprocket as shiprocket_service
 
 _log = logging.getLogger(__name__)
 router = APIRouter(prefix="/merch", tags=["merch"])
+
+
+@router.get("/promo/validate", response_model=PromoValidateResponse)
+async def validate_promo_code(
+    code: str,
+    product_id: str | None = None,
+    user: dict = Depends(require_user),
+):
+    waitlist_row = await queries.get_waitlist_by_merch_code_with_email(code)
+    if not waitlist_row:
+        return PromoValidateResponse(valid=False, error_type="invalid_code")
+
+    if waitlist_row["merch_code_redeemed_at"] is not None:
+        return PromoValidateResponse(valid=False, error_type="already_used")
+
+    user_record = await queries.get_user_by_id(user["sub"])
+    user_email = user_record["email"] if user_record else None
+    if user_email != waitlist_row["email"]:
+        return PromoValidateResponse(valid=False, error_type="not_yours")
+
+    discount_amount_inr = None
+    if product_id:
+        product = await queries.get_merch_product(product_id)
+        if product:
+            discount_amount_inr = int(product["price_inr"] * 0.20)
+
+    return PromoValidateResponse(
+        valid=True,
+        discount_percent=20,
+        discount_amount_inr=discount_amount_inr,
+        error_type=None,
+    )
 
 
 @router.get("/products")
@@ -41,8 +77,15 @@ async def initiate_order(body: InitiateOrderRequest, user: dict = Depends(requir
     promo_code = None
 
     if body.promo_code:
-        waitlist_row = await queries.get_waitlist_by_promo_code(body.promo_code)
-        if not waitlist_row:
+        waitlist_row = await queries.get_waitlist_by_merch_code_with_email(body.promo_code)
+        if not waitlist_row or waitlist_row["merch_code_redeemed_at"] is not None:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "invalid_promo_code", "message": "Invalid or already used promo code"},
+            )
+        user_record = await queries.get_user_by_id(user["sub"])
+        user_email = user_record["email"] if user_record else None
+        if user_email != waitlist_row["email"]:
             raise HTTPException(
                 status_code=400,
                 detail={"code": "invalid_promo_code", "message": "Invalid or already used promo code"},
@@ -52,7 +95,6 @@ async def initiate_order(body: InitiateOrderRequest, user: dict = Depends(requir
 
     final_amount = price - discount
 
-    import httpx
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
             "https://api.razorpay.com/v1/orders",
@@ -112,4 +154,68 @@ async def confirm_order(body: ConfirmOrderRequest, user: dict = Depends(require_
     if order.get("promo_code"):
         await queries.redeem_merch_promo_code(order["promo_code"])
 
+    asyncio.create_task(_auto_fulfill(body.order_id))
+
     return {"order_id": body.order_id, "status": "paid"}
+
+
+async def _auto_fulfill(order_id: str) -> None:
+    try:
+        order = await queries.get_merch_order(order_id)
+        if not order:
+            _log.error("[merch] auto-fulfill: order %s not found", order_id)
+            return
+        product = await queries.get_merch_product(order["product_id"])
+        if not product:
+            _log.error("[merch] auto-fulfill: product not found for order %s", order_id)
+            return
+        result = await shiprocket_service.create_shipment(order, product)
+        shiprocket_order_id = str(result.get("order_id", ""))
+        shiprocket_awb = str(result.get("awb_code", ""))
+        await queries.auto_confirm_merch_order(
+            order_id=order_id,
+            shiprocket_order_id=shiprocket_order_id,
+            shiprocket_awb=shiprocket_awb,
+        )
+    except Exception as e:
+        _log.error("[merch] auto-fulfill failed for order %s: %s", order_id, e)
+
+
+@router.get("/orders")
+async def list_my_orders(user: dict = Depends(require_user)):
+    orders = await queries.get_user_orders(user["sub"])
+    return orders
+
+
+@router.get("/orders/{order_id}/tracking")
+async def get_order_tracking(order_id: str, user: dict = Depends(require_user)):
+    order = await queries.get_merch_order(order_id)
+    if not order or str(order["user_id"]) != user["sub"]:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    awb = order.get("shiprocket_awb")
+    if not awb:
+        return {"status": "pending_fulfillment", "tracking_events": []}
+
+    try:
+        raw = await shiprocket_service.track_shipment(awb)
+        tracking_data = raw.get("tracking_data", {})
+        shipment_track = tracking_data.get("shipment_track", [{}])
+        track = shipment_track[0] if shipment_track else {}
+        activities = tracking_data.get("shipment_track_activities", [])
+        return {
+            "awb": awb,
+            "courier_name": track.get("courier_name", ""),
+            "current_status": track.get("current_status", ""),
+            "tracking_events": [
+                {
+                    "date": a.get("date", ""),
+                    "activity": a.get("activity", ""),
+                    "location": a.get("location", ""),
+                }
+                for a in activities
+            ],
+        }
+    except Exception as e:
+        _log.error("[merch] tracking failed for AWB %s: %s", awb, e)
+        raise HTTPException(status_code=502, detail="tracking_unavailable")

@@ -56,13 +56,23 @@ async def tts_bg(
     lang: str,
     results: dict[int, bytes],
     prepend_silence: bool = False,
-) -> None:
+) -> bool:
+    """Returns True on success, False when both attempts fail (retry-exhausted)."""
     try:
         wav = await synthesise_sentence(text, lang, prepend_silence=prepend_silence)
         results[seq] = wav
+        return True
     except Exception as e:
-        _log.warning("[tts_bg] seq=%d failed: %r", seq, e)
+        _log.warning("[tts_bg] seq=%d first attempt failed: %r — retrying in 500ms", seq, e)
+    await asyncio.sleep(0.5)
+    try:
+        wav = await synthesise_sentence(text, lang, prepend_silence=prepend_silence)
+        results[seq] = wav
+        return True
+    except Exception as e:
+        _log.error("[tts_bg] seq=%d retry also failed: %r", seq, e)
         results[seq] = b""
+        return False
 
 
 # ── Internal synthesis helpers ────────────────────────────────────────────────

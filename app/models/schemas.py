@@ -172,6 +172,13 @@ class BugReportUpdateRequest(BaseModel):
 
 # ── Merch ─────────────────────────────────────────────────────────────────────
 
+class PromoValidateResponse(BaseModel):
+    valid: bool
+    discount_percent: int | None = None
+    discount_amount_inr: int | None = None
+    error_type: str | None = None
+
+
 class MerchVariant(BaseModel):
     id: str
     label: str
