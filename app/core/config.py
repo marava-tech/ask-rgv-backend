@@ -49,8 +49,7 @@ class Settings(BaseSettings):
     # Merch + payments
     razorpay_key_id: str = ""
     razorpay_key_secret: str = ""
-    shiprocket_email: str = ""
-    shiprocket_password: str = ""
+    shiprocket_token: str = ""
     minio_endpoint: str = ""
     minio_access_key: str = ""
     minio_secret_key: str = ""

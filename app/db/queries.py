@@ -978,6 +978,15 @@ async def get_waitlist_by_promo_code(promo_code: str) -> dict | None:
     return dict(row) if row else None
 
 
+async def get_waitlist_by_merch_code_with_email(promo_code: str) -> dict | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT email, merch_code_redeemed_at FROM waitlist_signups WHERE merch_promo_code = $1",
+        promo_code,
+    )
+    return dict(row) if row else None
+
+
 async def redeem_merch_promo_code(promo_code: str) -> None:
     pool = get_pool()
     await pool.execute(
@@ -1180,11 +1189,51 @@ async def update_merch_order_by_shiprocket_id(shiprocket_order_id: str, status: 
     )
 
 
-async def list_merch_orders() -> list[dict]:
+async def get_user_orders(user_id: str) -> list[dict]:
     import json as _json
     pool = get_pool()
     rows = await pool.fetch(
         """
+        SELECT o.id, o.product_id, o.variant_id, o.amount_inr, o.status,
+               o.shiprocket_awb, o.shiprocket_status, o.created_at,
+               p.name as product_name,
+               (SELECT v->>'label' FROM jsonb_array_elements(p.variants) v WHERE v->>'id' = o.variant_id LIMIT 1) as variant_label
+        FROM merch_orders o
+        JOIN merch_products p ON o.product_id = p.id
+        WHERE o.user_id = $1
+        ORDER BY o.created_at DESC
+        """,
+        UUID(user_id),
+    )
+    result = []
+    for row in rows:
+        d = dict(row)
+        d["id"] = str(d["id"])
+        d["product_id"] = str(d["product_id"])
+        d["created_at"] = d["created_at"].isoformat()
+        result.append(d)
+    return result
+
+
+async def auto_confirm_merch_order(order_id: str, shiprocket_order_id: str, shiprocket_awb: str) -> None:
+    pool = get_pool()
+    await pool.execute(
+        """
+        UPDATE merch_orders
+        SET status = 'confirmed', shiprocket_order_id = $1, shiprocket_awb = $2, updated_at = NOW()
+        WHERE id = $3
+        """,
+        shiprocket_order_id, shiprocket_awb, UUID(order_id),
+    )
+
+
+async def list_merch_orders(status: str | None = None) -> list[dict]:
+    import json as _json
+    pool = get_pool()
+    where = "WHERE o.status = $1" if status else ""
+    args = [status] if status else []
+    rows = await pool.fetch(
+        f"""
         SELECT o.id, o.user_id, o.product_id, o.variant_id, o.amount_inr, o.original_amount_inr,
                o.promo_code, o.razorpay_order_id, o.razorpay_payment_id, o.status,
                o.shipping_address, o.shiprocket_order_id, o.shiprocket_awb, o.shiprocket_status,
@@ -1192,8 +1241,10 @@ async def list_merch_orders() -> list[dict]:
         FROM merch_orders o
         JOIN users u ON o.user_id = u.id
         JOIN merch_products p ON o.product_id = p.id
+        {where}
         ORDER BY o.created_at DESC
-        """
+        """,
+        *args,
     )
     result = []
     for row in rows:
