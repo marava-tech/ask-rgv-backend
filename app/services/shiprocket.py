@@ -4,39 +4,18 @@ from core.config import settings
 
 _log = logging.getLogger(__name__)
 _SHIPROCKET_BASE = "https://apiv2.shiprocket.in/v1/external"
-_token: str | None = None
-
-
-async def _authenticate() -> str:
-    global _token
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            f"{_SHIPROCKET_BASE}/auth/login",
-            json={"email": settings.shiprocket_email, "password": settings.shiprocket_password},
-        )
-        resp.raise_for_status()
-        _token = resp.json()["token"]
-        _log.info("[shiprocket] authenticated, token refreshed")
-        return _token
-
-
-async def _get_token() -> str:
-    global _token
-    if _token:
-        return _token
-    return await _authenticate()
 
 
 async def _request(method: str, path: str, **kwargs) -> dict:
-    token = await _get_token()
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {settings.shiprocket_token}",
+        "Content-Type": "application/json",
+    }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.request(method, f"{_SHIPROCKET_BASE}{path}", headers=headers, **kwargs)
         if resp.status_code == 401:
-            _log.warning("[shiprocket] 401 — re-authenticating")
-            token = await _authenticate()
-            headers["Authorization"] = f"Bearer {token}"
-            resp = await client.request(method, f"{_SHIPROCKET_BASE}{path}", headers=headers, **kwargs)
+            _log.error("[shiprocket] 401 Unauthorized — rotate SHIPROCKET_TOKEN in .env")
+            raise RuntimeError("Shiprocket token invalid or expired — rotate SHIPROCKET_TOKEN in .env")
         _log.info("[shiprocket] %s %s → %d: %s", method, path, resp.status_code, resp.text[:500])
         resp.raise_for_status()
         return resp.json()
@@ -76,3 +55,7 @@ async def create_shipment(order: dict, product: dict) -> dict:
         "weight": 0.5,
     }
     return await _request("POST", "/orders/create/adhoc", json=payload)
+
+
+async def track_shipment(awb: str) -> dict:
+    return await _request("GET", f"/courier/track/awb/{awb}")
