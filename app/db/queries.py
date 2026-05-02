@@ -28,7 +28,7 @@ async def upsert_user(google_id: str, email: str, display_name: str, avatar_url:
 async def get_user_by_id(user_id: str) -> dict | None:
     pool = get_pool()
     row = await pool.fetchrow(
-        "SELECT id, google_id, email, display_name, avatar_url, tier, preferred_language, preferred_name, fcm_token, created_at FROM users WHERE id = $1",
+        "SELECT id, google_id, email, display_name, avatar_url, tier, preferred_language, preferred_name, fcm_token, created_at, current_streak, longest_streak, last_active_date, unlocked_themes FROM users WHERE id = $1",
         UUID(user_id),
     )
     return dict(row) if row else None
@@ -73,6 +73,47 @@ async def update_user_preferences(user_id: str, preferred_language: str | None, 
         await pool.execute("UPDATE users SET preferred_language = $1 WHERE id = $2", preferred_language, UUID(user_id))
     elif preferred_name is not None:
         await pool.execute("UPDATE users SET preferred_name = $1 WHERE id = $2", preferred_name, UUID(user_id))
+
+async def record_user_activity(user_id: str) -> dict:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        WITH updated AS (
+            UPDATE users
+            SET 
+                current_streak = CASE 
+                    WHEN last_active_date = CURRENT_DATE THEN current_streak
+                    WHEN last_active_date = CURRENT_DATE - INTERVAL '1 day' THEN current_streak + 1
+                    ELSE 1
+                END,
+                longest_streak = GREATEST(
+                    longest_streak,
+                    CASE 
+                        WHEN last_active_date = CURRENT_DATE THEN current_streak
+                        WHEN last_active_date = CURRENT_DATE - INTERVAL '1 day' THEN current_streak + 1
+                        ELSE 1
+                    END
+                ),
+                last_active_date = CURRENT_DATE
+            WHERE id = $1
+            RETURNING current_streak, longest_streak, (last_active_date IS DISTINCT FROM CURRENT_DATE) as streak_updated
+        )
+        SELECT * FROM updated
+        """,
+        UUID(user_id),
+    )
+    return dict(row)
+
+async def unlock_user_theme(user_id: str, theme_id: str) -> None:
+    pool = get_pool()
+    await pool.execute(
+        """
+        UPDATE users 
+        SET unlocked_themes = array_append(unlocked_themes, $2)
+        WHERE id = $1 AND NOT ($2 = ANY(unlocked_themes))
+        """,
+        UUID(user_id), theme_id,
+    )
 
 
 # ── Refresh tokens ────────────────────────────────────────────────────────────
