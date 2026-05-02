@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from core.auth import require_user
 from db import queries
 from db.pool import get_pool
+from models.schemas import GamificationActivityResponse, ThemeUnlockRequest
 
 logger = logging.getLogger(__name__)
 
@@ -66,3 +67,16 @@ async def delete_user_memory(user: dict = Depends(require_user)):
     if not user_data or user_data.get("tier") != "super_fan":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super Fan only")
     await queries.delete_user_memory(user["sub"])
+
+
+@router.post("/gamification/activity", response_model=GamificationActivityResponse)
+async def record_gamification_activity(user: dict = Depends(require_user)):
+    result = await queries.record_user_activity(user["sub"])
+    return GamificationActivityResponse(**result)
+
+
+@router.post("/gamification/unlock-theme", status_code=200)
+async def unlock_theme(req: ThemeUnlockRequest, user: dict = Depends(require_user)):
+    await queries.unlock_user_theme(user["sub"], req.theme_id)
+    return {"status": "success"}
+
