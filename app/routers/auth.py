@@ -59,6 +59,9 @@ async def google_auth(body: GoogleAuthRequest):
             tier=tier,
             preferred_language=user.get("preferred_language"),
             preferred_name=user.get("preferred_name"),
+            current_streak=user.get("current_streak") or 0,
+            longest_streak=user.get("longest_streak") or 0,
+            last_active_date=user.get("last_active_date"),
         ),
     )
 
@@ -121,12 +124,17 @@ async def refresh(body: RefreshRequest):
             tier=user["tier"],
             preferred_language=user.get("preferred_language"),
             preferred_name=user.get("preferred_name"),
+            current_streak=user.get("current_streak") or 0,
+            longest_streak=user.get("longest_streak") or 0,
+            last_active_date=user.get("last_active_date"),
+            unlocked_themes=user.get("unlocked_themes") or ["default"],
         ),
     )
 
 
 @router.get("/me", response_model=UserInfo)
 async def get_me(user: dict = Depends(require_user)):
+    await queries.record_user_activity(user["sub"])
     row = await queries.get_user_by_id(user["sub"])
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
@@ -138,6 +146,10 @@ async def get_me(user: dict = Depends(require_user)):
         tier=row["tier"],
         preferred_language=row.get("preferred_language"),
         preferred_name=row.get("preferred_name"),
+        current_streak=row.get("current_streak") or 0,
+        longest_streak=row.get("longest_streak") or 0,
+        last_active_date=row.get("last_active_date"),
+        unlocked_themes=row.get("unlocked_themes") or ["default"],
     )
 
 
@@ -153,6 +165,10 @@ async def update_me(body: UpdateMeRequest, user: dict = Depends(require_user)):
         tier=row["tier"],
         preferred_language=row.get("preferred_language"),
         preferred_name=row.get("preferred_name"),
+        current_streak=row.get("current_streak") or 0,
+        longest_streak=row.get("longest_streak") or 0,
+        last_active_date=row.get("last_active_date"),
+        unlocked_themes=row.get("unlocked_themes") or ["default"],
     )
 
 
