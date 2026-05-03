@@ -26,6 +26,7 @@ from services.claude import sonnet_stream
 from services.crisis import detect_crisis, get_safety_response
 from services.intent import classify_intent
 from services.language import detect_language, get_session_language, set_session_language
+from services.quota import get_redis as _get_redis
 from services.prompt import assemble_prompt, estimate_turn_duration
 from services.qdrant_search import search_chunks
 from services.quota import add_quota_usage, get_quota_remaining, get_tier_limit_seconds, verify_device_token
@@ -37,6 +38,26 @@ from services.tts import flush_audio, pop_sentences, tts_bg
 _log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/conversation", tags=["conversation"])
+
+_ASSESSMENT_CACHE_TTL = 3600  # 1 hour per session
+
+
+async def _get_session_assessment(session_id: str, user_id: str | None) -> str | None:
+    if not user_id:
+        return None
+    r = _get_redis()
+    cache_key = f"session:assessment:{session_id}"
+    cached = await r.get(cache_key)
+    if cached is not None:
+        return cached or None  # empty string means "no assessment" sentinel
+    row = await queries.get_user_valid_assessment(user_id)
+    if row:
+        assessment_row = await queries.get_latest_assessment(user_id)
+        text = (assessment_row or {}).get("assessment_text") or ""
+        await r.setex(cache_key, _ASSESSMENT_CACHE_TTL, text)
+        return text or None
+    await r.setex(cache_key, _ASSESSMENT_CACHE_TTL, "")
+    return None
 
 
 def _sse(event: str, data: dict) -> str:
@@ -138,6 +159,8 @@ async def conversation_turn(request: Request, body: TurnRequest, user: dict | No
 
             is_first_turn = (len(history) == 0)
 
+            assessment_text = await _get_session_assessment(body.session_id, user_id)
+
             messages, system_blocks = await assemble_prompt(
                 intent=intent,
                 history=history,
@@ -148,6 +171,7 @@ async def conversation_turn(request: Request, body: TurnRequest, user: dict | No
                 mode=body.mode,
                 user_name=user_data.get("preferred_name") if user_data else None,
                 loader=getattr(request.app.state, "prompt_loader", None),
+                assessment_text=assessment_text,
             )
 
             # Pre-allocate turn_id so we can return it immediately after streaming,
@@ -290,6 +314,13 @@ async def conversation_turn(request: Request, body: TurnRequest, user: dict | No
                 "rag_chunks": len(rag_chunks),
                 "turn_seconds": turn_seconds,
             })
+
+            if user_id:
+                conv_count = await queries.get_user_conversation_count(user_id)
+                if conv_count == 4:
+                    valid_assessment = await queries.get_user_valid_assessment(user_id)
+                    if not valid_assessment:
+                        yield _sse("quiz_prompt", {"message": "RGV wants to assess you."})
         except Exception as e:
             _log.exception("[turn] setup error: %r", e)
             yield _sse("error", {"code": "STREAM_ERROR"})
