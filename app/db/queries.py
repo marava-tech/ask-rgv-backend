@@ -1342,19 +1342,35 @@ async def list_merch_orders(status: str | None = None) -> list[dict]:
 # ── Quiz ──────────────────────────────────────────────────────────────────────
 
 async def get_quiz_questions() -> list:
+    import json as _json
     pool = get_pool()
-    return await pool.fetch(
+    rows = await pool.fetch(
         "SELECT id, question_text, options, allows_multiple_select, display_order FROM quiz_questions WHERE enabled = true ORDER BY display_order"
     )
+    result = []
+    for r in rows:
+        d = dict(r)
+        if isinstance(d["options"], str):
+            d["options"] = _json.loads(d["options"])
+        result.append(d)
+    return result
 
 
 async def get_quiz_questions_by_ids(question_ids: list[str]) -> list:
+    import json as _json
     pool = get_pool()
     uuids = [UUID(qid) for qid in question_ids]
-    return await pool.fetch(
+    rows = await pool.fetch(
         "SELECT id, question_text, options, allows_multiple_select FROM quiz_questions WHERE id = ANY($1)",
         uuids,
     )
+    result = []
+    for r in rows:
+        d = dict(r)
+        if isinstance(d["options"], str):
+            d["options"] = _json.loads(d["options"])
+        result.append(d)
+    return result
 
 
 async def get_user_valid_assessment(user_id: str) -> dict | None:
