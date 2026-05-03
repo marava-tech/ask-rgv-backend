@@ -16,7 +16,7 @@ async def get_quiz_questions(user: dict = Depends(get_current_user)):
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
     rows = await queries.get_quiz_questions()
-    return [QuizQuestionOut(**dict(r)) for r in rows]
+    return [QuizQuestionOut(**r) for r in rows]
 
 
 @router.post("/submit", response_model=QuizSubmitResponse, status_code=202)
