@@ -39,7 +39,8 @@ async def admin_create_product(body: MerchProductCreate, _=Depends(require_admin
 
 @router.put("/products/{product_id}")
 async def admin_update_product(product_id: str, body: MerchProductUpdate, _=Depends(require_admin)):
-    updates = body.model_dump(exclude_none=True)
+    # Use exclude_unset so explicit None values (presale clear) are passed through
+    updates = body.model_dump(exclude_unset=True)
     if "variants" in updates:
         for v in updates["variants"]:
             if not v.get("id"):
