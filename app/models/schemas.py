@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID
 from pydantic import BaseModel, Field, field_validator
 from typing import Literal
@@ -20,7 +20,7 @@ class UserInfo(BaseModel):
     preferred_name: str | None = None
     current_streak: int = 0
     longest_streak: int = 0
-    last_active_date: str | None = None
+    last_active_date: date | None = None
     unlocked_themes: list[str] = Field(default_factory=lambda: ["default"])
 
 class GamificationActivityResponse(BaseModel):
