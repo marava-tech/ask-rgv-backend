@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field
+from datetime import datetime
+from uuid import UUID
+from pydantic import BaseModel, Field, field_validator
 from typing import Literal
 
 
@@ -144,6 +146,46 @@ class PackVerifyResponse(BaseModel):
     success: bool
 
 
+# ── Quiz ─────────────────────────────────────────────────────────────────────
+
+class QuizQuestionOut(BaseModel):
+    id: UUID
+    question_text: str
+    options: list[str]
+    allows_multiple_select: bool
+    display_order: int
+
+
+class QuizAnswerIn(BaseModel):
+    question_id: UUID
+    selected_option_indices: list[int] = Field(min_length=1)
+
+
+class QuizSubmitRequest(BaseModel):
+    answers: list[QuizAnswerIn]
+
+    @field_validator("answers")
+    @classmethod
+    def must_be_11(cls, v: list) -> list:
+        if len(v) != 11:
+            raise ValueError("exactly 11 answers required")
+        return v
+
+
+class QuizSubmitResponse(BaseModel):
+    session_id: str
+    status: str
+
+
+class QuizAssessmentOut(BaseModel):
+    status: str
+    assessment_text: str | None = None
+    assessed_at: datetime | None = None
+    expires_at: datetime | None = None
+    version: int | None = None
+    can_reassess: bool = True
+
+
 # ── Admin ingestion ───────────────────────────────────────────────────────────
 
 class IngestSingleRequest(BaseModel):
@@ -212,6 +254,9 @@ class MerchProductUpdate(BaseModel):
     image_url: str | None = None
     variants: list[MerchVariant] | None = None
     enabled: bool | None = None
+    presale_start_at: datetime | None = None
+    presale_end_at: datetime | None = None
+    presale_discount_pct: int | None = None
 
 
 class MerchProductOut(BaseModel):
@@ -219,9 +264,15 @@ class MerchProductOut(BaseModel):
     name: str
     description: str | None = None
     price_inr: int
+    effective_price_inr: int
+    is_presale_active: bool = False
+    presale_price_inr: int | None = None
+    presale_ends_at: datetime | None = None
+    presale_discount_pct: int | None = None
     image_url: str | None = None
     variants: list[MerchVariant] = []
     enabled: bool
+    recent_bought_count: int = 0
 
 
 class ShippingAddress(BaseModel):

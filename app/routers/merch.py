@@ -72,7 +72,10 @@ async def initiate_order(body: InitiateOrderRequest, user: dict = Depends(requir
     if body.variant_id not in variant_ids:
         raise HTTPException(status_code=400, detail="Invalid variant")
 
-    price = product["price_inr"]
+    # Server-authoritative pricing: use effective_price_inr (presale price or full price)
+    # Promo codes and presale discounts are separate systems (non-stackable per spec)
+    original_price = product["price_inr"]
+    price = product["effective_price_inr"]
     discount = 0
     promo_code = None
 
@@ -111,7 +114,7 @@ async def initiate_order(body: InitiateOrderRequest, user: dict = Depends(requir
         product_id=body.product_id,
         variant_id=body.variant_id,
         amount_inr=final_amount,
-        original_amount_inr=price,
+        original_amount_inr=original_price,
         promo_code=promo_code,
         razorpay_order_id=rzp_order["id"],
     )

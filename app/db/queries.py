@@ -12,13 +12,13 @@ async def upsert_user(google_id: str, email: str, display_name: str, avatar_url:
     pool = get_pool()
     row = await pool.fetchrow(
         """
-        INSERT INTO users (google_id, email, display_name, avatar_url)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO users (google_id, email, display_name, avatar_url, current_streak, longest_streak, last_active_date)
+        VALUES ($1, $2, $3, $4, 1, 1, CURRENT_DATE)
         ON CONFLICT (google_id) DO UPDATE
             SET email = EXCLUDED.email,
                 display_name = EXCLUDED.display_name,
                 avatar_url = EXCLUDED.avatar_url
-        RETURNING id, tier, preferred_language, preferred_name
+        RETURNING id, tier, preferred_language, preferred_name, current_streak, longest_streak, last_active_date
         """,
         google_id, email, display_name, avatar_url,
     )
@@ -1038,41 +1038,78 @@ async def redeem_merch_promo_code(promo_code: str) -> None:
 
 # ── Merch Products ─────────────────────────────────────────────────────────────
 
+def compute_effective_price(product: dict) -> dict:
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    start = product.get("presale_start_at")
+    end = product.get("presale_end_at")
+    pct = product.get("presale_discount_pct")
+    price = product["price_inr"]
+
+    if start and end and pct and start <= now <= end:
+        discounted = int(price * (1 - pct / 100.0))
+        product["is_presale_active"] = True
+        product["effective_price_inr"] = discounted
+        product["presale_price_inr"] = discounted
+        product["presale_ends_at"] = end
+    else:
+        product["is_presale_active"] = False
+        product["effective_price_inr"] = price
+        product["presale_price_inr"] = None
+        product["presale_ends_at"] = None
+    return product
+
+
 async def list_merch_products(enabled_only: bool = True) -> list[dict]:
     import json as _json
     pool = get_pool()
-    if enabled_only:
-        rows = await pool.fetch(
-            "SELECT id, name, description, price_inr, image_url, variants, enabled FROM merch_products WHERE enabled = true ORDER BY created_at ASC"
-        )
-    else:
-        rows = await pool.fetch(
-            "SELECT id, name, description, price_inr, image_url, variants, enabled FROM merch_products ORDER BY created_at ASC"
-        )
+    query = """
+        SELECT
+            p.id, p.name, p.description, p.price_inr, p.image_url, p.variants, p.enabled,
+            p.presale_start_at, p.presale_end_at, p.presale_discount_pct,
+            COUNT(o.id)::int as recent_bought_count
+        FROM merch_products p
+        LEFT JOIN merch_orders o ON p.id = o.product_id
+            AND o.status IN ('paid', 'fulfilled', 'delivered')
+            AND o.created_at > NOW() - INTERVAL '30 days'
+        WHERE ($1 = false OR p.enabled = true)
+        GROUP BY p.id
+        ORDER BY p.created_at ASC
+    """
+    rows = await pool.fetch(query, enabled_only)
     result = []
     for row in rows:
         d = dict(row)
         d["id"] = str(d["id"])
         if isinstance(d["variants"], str):
             d["variants"] = _json.loads(d["variants"])
-        result.append(d)
+        result.append(compute_effective_price(d))
     return result
 
 
 async def get_merch_product(product_id: str) -> dict | None:
     import json as _json
     pool = get_pool()
-    row = await pool.fetchrow(
-        "SELECT id, name, description, price_inr, image_url, variants, enabled FROM merch_products WHERE id = $1",
-        UUID(product_id),
-    )
+    query = """
+        SELECT
+            p.id, p.name, p.description, p.price_inr, p.image_url, p.variants, p.enabled,
+            p.presale_start_at, p.presale_end_at, p.presale_discount_pct,
+            COUNT(o.id)::int as recent_bought_count
+        FROM merch_products p
+        LEFT JOIN merch_orders o ON p.id = o.product_id
+            AND o.status IN ('paid', 'fulfilled', 'delivered')
+            AND o.created_at > NOW() - INTERVAL '30 days'
+        WHERE p.id = $1
+        GROUP BY p.id
+    """
+    row = await pool.fetchrow(query, UUID(product_id))
     if not row:
         return None
     d = dict(row)
     d["id"] = str(d["id"])
     if isinstance(d["variants"], str):
         d["variants"] = _json.loads(d["variants"])
-    return d
+    return compute_effective_price(d)
 
 
 async def create_merch_product(name: str, description: str | None, price_inr: int, image_url: str | None, variants: list) -> dict:
@@ -1111,7 +1148,9 @@ async def update_merch_product(product_id: str, updates: dict) -> dict | None:
         return await get_merch_product(product_id)
     vals.append(UUID(product_id))
     row = await pool.fetchrow(
-        f"UPDATE merch_products SET {', '.join(sets)} WHERE id = ${i} RETURNING id, name, description, price_inr, image_url, variants, enabled",
+        f"UPDATE merch_products SET {', '.join(sets)} WHERE id = ${i} "
+        f"RETURNING id, name, description, price_inr, image_url, variants, enabled, "
+        f"presale_start_at, presale_end_at, presale_discount_pct",
         *vals,
     )
     if not row:
@@ -1120,7 +1159,7 @@ async def update_merch_product(product_id: str, updates: dict) -> dict | None:
     d["id"] = str(d["id"])
     if isinstance(d["variants"], str):
         d["variants"] = _json.loads(d["variants"])
-    return d
+    return compute_effective_price(d)
 
 
 # ── Merch Orders ──────────────────────────────────────────────────────────────
@@ -1298,3 +1337,120 @@ async def list_merch_orders(status: str | None = None) -> list[dict]:
             d["shipping_address"] = _json.loads(d["shipping_address"])
         result.append(d)
     return result
+
+
+# ── Quiz ──────────────────────────────────────────────────────────────────────
+
+async def get_quiz_questions() -> list:
+    pool = get_pool()
+    return await pool.fetch(
+        "SELECT id, question_text, options, allows_multiple_select, display_order FROM quiz_questions WHERE enabled = true ORDER BY display_order"
+    )
+
+
+async def get_quiz_questions_by_ids(question_ids: list[str]) -> list:
+    pool = get_pool()
+    uuids = [UUID(qid) for qid in question_ids]
+    return await pool.fetch(
+        "SELECT id, question_text, options, allows_multiple_select FROM quiz_questions WHERE id = ANY($1)",
+        uuids,
+    )
+
+
+async def get_user_valid_assessment(user_id: str) -> dict | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT id, expires_at FROM user_rgv_assessments
+        WHERE user_id = $1 AND status = 'ready' AND expires_at > now()
+        ORDER BY version DESC LIMIT 1
+        """,
+        UUID(user_id),
+    )
+    return dict(row) if row else None
+
+
+async def get_next_assessment_version(user_id: str) -> int:
+    pool = get_pool()
+    val = await pool.fetchval(
+        "SELECT COALESCE(MAX(version), 0) + 1 FROM user_rgv_assessments WHERE user_id = $1",
+        UUID(user_id),
+    )
+    return val or 1
+
+
+async def create_assessment(user_id: str, session_id: str, raw_answers: list[dict], version: int) -> str:
+    import json as _json
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO user_rgv_assessments (user_id, raw_answers, assessment_text, expires_at, version, status)
+        VALUES ($1, $2::jsonb, '', now() + interval '30 days', $3, 'processing')
+        RETURNING id
+        """,
+        UUID(user_id),
+        _json.dumps(raw_answers),
+        version,
+    )
+    return str(row["id"])
+
+
+async def insert_quiz_responses(user_id: str, session_id: str, answers: list) -> None:
+    pool = get_pool()
+    session_uuid = UUID(session_id)
+    user_uuid = UUID(user_id)
+    rows = [
+        (
+            user_uuid,
+            session_uuid,
+            UUID(str(a.question_id)),
+            a.selected_option_indices,
+        )
+        for a in answers
+    ]
+    await pool.executemany(
+        """
+        INSERT INTO user_quiz_responses (user_id, assessment_session_id, question_id, selected_option_indices)
+        VALUES ($1, $2, $3, $4)
+        """,
+        rows,
+    )
+
+
+async def update_assessment_ready(assessment_id: str, assessment_text: str) -> None:
+    pool = get_pool()
+    await pool.execute(
+        "UPDATE user_rgv_assessments SET assessment_text = $1, status = 'ready' WHERE id = $2",
+        assessment_text, UUID(assessment_id),
+    )
+
+
+async def update_assessment_status(assessment_id: str, status: str) -> None:
+    pool = get_pool()
+    await pool.execute(
+        "UPDATE user_rgv_assessments SET status = $1 WHERE id = $2",
+        status, UUID(assessment_id),
+    )
+
+
+async def get_latest_assessment(user_id: str) -> dict | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT id, status, assessment_text, assessed_at, expires_at, version
+        FROM user_rgv_assessments
+        WHERE user_id = $1
+        ORDER BY version DESC LIMIT 1
+        """,
+        UUID(user_id),
+    )
+    return dict(row) if row else None
+
+
+async def get_user_conversation_count(user_id: str) -> int:
+    pool = get_pool()
+    val = await pool.fetchval(
+        "SELECT COUNT(*) FROM sessions WHERE user_id = $1 AND turn_count > 0",
+        UUID(user_id),
+    )
+    return int(val or 0)

@@ -86,6 +86,7 @@ async def assemble_prompt(
     user_memories: str | None = None,
     user_name: str | None = None,
     loader: PromptLoader | None = None,
+    assessment_text: str | None = None,
 ) -> tuple[list[dict], list[dict]]:
     rag_text = ""
     if rag_chunks:
@@ -127,6 +128,20 @@ async def assemble_prompt(
             "cache_control": {"type": "ephemeral"},
         },
     ]
+
+    if assessment_text:
+        assessment_block = (
+            f"RGV's prior read on this user (from their worldview assessment):\n\n"
+            f'"{assessment_text}"\n\n'
+            f"Use this as background context. Do not announce that you have assessed this person.\n"
+            f"Do not reference this assessment directly unless the user brings it up.\n"
+            f"Let it inform how you engage them — their philosophical lean, what they value, where they're likely to resist."
+        )
+        system_blocks.append({
+            "type": "text",
+            "text": assessment_block,
+            "cache_control": {"type": "ephemeral"},
+        })
 
     if rag_text:
         # BO-01: cache the RAG block separately — cache hits when the same chunks recur
