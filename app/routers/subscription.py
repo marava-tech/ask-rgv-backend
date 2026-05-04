@@ -125,7 +125,7 @@ async def verify_subscription(body: IAPVerifyRequest, user: dict = Depends(requi
         # Should not happen given the initial check, but for safety:
         tier = "fan" if "fan" in effective_product_id else "super_fan"
 
-    period = "annual" if (effective_product_id in _ANNUAL_PRODUCTS or "annual" in effective_product_id) else "monthly"
+    period = "annual" if (effective_product_id in _ANNUAL_PRODUCTS or "annual" in str(effective_product_id)) else "monthly"
     
     await queries.activate_iap_subscription(
         user_id=user["sub"],
@@ -169,7 +169,7 @@ async def rtdn_webhook(request: Request):
             effective_product_id = purchase.get("base_plan_id") or product_id or ""
             tier = _SUBSCRIPTION_PRODUCT_TIERS.get(effective_product_id) or _SUBSCRIPTION_PRODUCT_TIERS.get(product_id or "")
             if tier:
-                period = "annual" if (effective_product_id in _ANNUAL_PRODUCTS or "annual" in effective_product_id) else "monthly"
+                period = "annual" if (effective_product_id in _ANNUAL_PRODUCTS or "annual" in str(effective_product_id)) else "monthly"
                 await queries.activate_iap_subscription_by_token(
                     purchase_token=purchase_token,
                     tier=tier,
@@ -234,7 +234,7 @@ async def continue_tomorrow(user: dict = Depends(require_user)):
 
     # Schedule via APScheduler (reuse existing scheduler in app)
     try:
-        from core.scheduler import scheduler
+        from main import scheduler
         job_id = f"continue_tomorrow:{user['sub']}"
         scheduler.add_job(
             _send_continue_tomorrow_push,
