@@ -41,9 +41,9 @@ _SUBSCRIPTION_PRODUCT_TIERS = {
     "ask-rgv-super-annual": "super_fan",
 }
 
-_PACK_TURNS = {
-    "ask_rgv_pack_5": 5,
-    "ask_rgv_pack_12": 12,
+_PACK_SECONDS = {
+    "ask_rgv_pack_5":  3600,   # 60 min  (5 sessions × 12 min)
+    "ask_rgv_pack_12": 10800,  # 180 min (premium bonus)
 }
 
 _ANNUAL_PRODUCTS = {
@@ -127,14 +127,21 @@ async def verify_subscription(body: IAPVerifyRequest, user: dict = Depends(requi
 
     period = "annual" if (effective_product_id in _ANNUAL_PRODUCTS or "annual" in str(effective_product_id)) else "monthly"
     
-    await queries.activate_iap_subscription(
-        user_id=user["sub"],
-        tier=tier,
-        purchase_token=body.purchase_token,
-        product_id=effective_product_id,
-        subscription_period=period,
-        expiry_time_millis=purchase.get("expiry_time_millis"),
-    )
+    try:
+        await queries.activate_iap_subscription(
+            user_id=user["sub"],
+            tier=tier,
+            purchase_token=body.purchase_token,
+            product_id=effective_product_id,
+            subscription_period=period,
+            expiry_time_millis=purchase.get("expiry_time_millis"),
+        )
+    except Exception:
+        logger.error(
+            "[iap] activate_iap_subscription failed — product_id=%s user_id=%s",
+            body.product_id, user["sub"], exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="Failed to activate subscription")
     return IAPVerifyResponse(tier=tier, success=True)
 
 
@@ -185,9 +192,9 @@ async def rtdn_webhook(request: Request):
 
 @router.post("/pack/verify", response_model=PackVerifyResponse)
 async def verify_pack(body: PackVerifyRequest, user: dict = Depends(require_user)):
-    """Verify a one-time conversation pack purchase and credit turns."""
-    turns = _PACK_TURNS.get(body.product_id)
-    if not turns:
+    """Verify a one-time conversation pack purchase and credit minutes."""
+    seconds = _PACK_SECONDS.get(body.product_id)
+    if not seconds:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unknown pack product: {body.product_id}",
@@ -211,9 +218,9 @@ async def verify_pack(body: PackVerifyRequest, user: dict = Depends(require_user
         user_id=user["sub"],
         product_id=body.product_id,
         purchase_token=body.purchase_token,
-        turns=turns,
+        seconds=seconds,
     )
-    return PackVerifyResponse(turns_credited=turns, success=True)
+    return PackVerifyResponse(seconds_credited=seconds, success=True)
 
 
 @router.post("/continue-tomorrow", status_code=202)
