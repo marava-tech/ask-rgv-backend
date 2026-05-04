@@ -142,8 +142,9 @@ class PackVerifyRequest(BaseModel):
 
 
 class PackVerifyResponse(BaseModel):
-    turns_credited: int
+    seconds_credited: int
     success: bool
+    turns_credited: int = 0  # deprecated, kept for backward compat
 
 
 # ── Quiz ─────────────────────────────────────────────────────────────────────
