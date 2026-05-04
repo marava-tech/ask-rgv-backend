@@ -29,7 +29,7 @@ from services.language import detect_language, get_session_language, set_session
 from services.quota import get_redis as _get_redis
 from services.prompt import assemble_prompt, estimate_turn_duration
 from services.qdrant_search import search_chunks
-from services.quota import add_quota_usage, get_quota_remaining, get_tier_limit_seconds, verify_device_token
+from services.quota import add_quota_usage, get_quota_remaining, get_tier_limit_seconds, try_consume_pack_seconds_for_turn, verify_device_token
 from services.session import generate_title
 from services.style_profiles import get_style_anchors
 from services.metrics import log_turn
@@ -292,7 +292,9 @@ async def conversation_turn(request: Request, body: TurnRequest, user: dict | No
                 limit = await get_tier_limit_seconds(tier)
                 new_used = await add_quota_usage(user_id, device_id, turn_seconds, limit)
                 if limit != -1 and new_used >= limit:
-                    yield _sse("quota_exhausted", {"tier": tier, "upgrade_url": "/subscription"})
+                    pack_covered = await try_consume_pack_seconds_for_turn(user_id, turn_seconds)
+                    if not pack_covered:
+                        yield _sse("quota_exhausted", {"tier": tier, "upgrade_url": "/subscription"})
 
             log_turn(
                 source="sse",

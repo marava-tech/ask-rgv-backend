@@ -482,7 +482,7 @@ async def activate_iap_subscription(
                         (user_id, tier, google_purchase_token, product_id, subscription_period,
                          status, current_period_end)
                     VALUES ($1, $2, $3, $4, $5, 'active', now() + $6::interval)
-                    ON CONFLICT (google_purchase_token) DO UPDATE
+                    ON CONFLICT (google_purchase_token) WHERE google_purchase_token IS NOT NULL DO UPDATE
                         SET status = 'active',
                             tier = EXCLUDED.tier,
                             subscription_period = EXCLUDED.subscription_period,
@@ -942,15 +942,15 @@ async def is_pack_token_used(purchase_token: str) -> bool:
 
 
 async def credit_quota_pack(
-    user_id: str, product_id: str, purchase_token: str, turns: int
+    user_id: str, product_id: str, purchase_token: str, seconds: int
 ) -> None:
     pool = get_pool()
     await pool.execute(
         """
-        INSERT INTO quota_packs (user_id, product_id, purchase_token, turns_remaining)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO quota_packs (user_id, product_id, purchase_token, seconds_remaining, turns_remaining)
+        VALUES ($1, $2, $3, $4, 0)
         """,
-        UUID(user_id), product_id, purchase_token, turns,
+        UUID(user_id), product_id, purchase_token, seconds,
     )
 
 
@@ -982,6 +982,41 @@ async def get_pack_turns_remaining(user_id: str) -> int:
     pool = get_pool()
     row = await pool.fetchrow(
         "SELECT COALESCE(SUM(turns_remaining), 0) AS total FROM quota_packs WHERE user_id = $1",
+        UUID(user_id),
+    )
+    return int(row["total"]) if row else 0
+
+
+async def consume_pack_seconds(user_id: str, amount: int) -> int:
+    """Deduct up to `amount` seconds from the oldest pack row with seconds_remaining > 0.
+    Returns the actual seconds deducted (0 if pool empty)."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT id, seconds_remaining FROM quota_packs
+                WHERE user_id = $1 AND seconds_remaining > 0
+                ORDER BY purchased_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+                """,
+                UUID(user_id),
+            )
+            if not row:
+                return 0
+            deduct = min(amount, row["seconds_remaining"])
+            await conn.execute(
+                "UPDATE quota_packs SET seconds_remaining = seconds_remaining - $1 WHERE id = $2",
+                deduct, row["id"],
+            )
+    return deduct
+
+
+async def get_pack_seconds_remaining(user_id: str) -> int:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT COALESCE(SUM(seconds_remaining), 0) AS total FROM quota_packs WHERE user_id = $1",
         UUID(user_id),
     )
     return int(row["total"]) if row else 0

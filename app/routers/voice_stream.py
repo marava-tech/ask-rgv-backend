@@ -25,6 +25,7 @@ from services.quota import (
     add_quota_usage,
     get_quota_remaining,
     get_tier_limit_seconds,
+    try_consume_pack_seconds_for_turn,
     is_jwt_blacklisted,
     verify_device_token,
 )
@@ -339,7 +340,9 @@ async def voice_stream(
             limit = await get_tier_limit_seconds(tier)
             new_used = await add_quota_usage(user_id, resolved_device_id, turn_seconds, limit)
             if limit != -1 and new_used >= limit:
-                await _send({"type": "quota_exhausted", "tier": tier})
+                pack_covered = await try_consume_pack_seconds_for_turn(user_id, turn_seconds)
+                if not pack_covered:
+                    await _send({"type": "quota_exhausted", "tier": tier})
 
     if pipeline_error:
         _log.exception("[voice_stream] pipeline error: %r", pipeline_error)
