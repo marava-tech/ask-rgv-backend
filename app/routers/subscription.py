@@ -29,10 +29,16 @@ router = APIRouter(prefix="/subscription", tags=["subscription"])
 # ── Product ID → tier mapping ─────────────────────────────────────────────────
 
 _SUBSCRIPTION_PRODUCT_TIERS = {
+    "ask_rgv_fan": "fan",
+    "ask_rgv_super": "super_fan",
     "ask_rgv_fan_monthly": "fan",
     "ask_rgv_fan_annual": "fan",
     "ask_rgv_super_monthly": "super_fan",
     "ask_rgv_super_annual": "super_fan",
+    "ask-rgv-fan-monthly": "fan",
+    "ask-rgv-fan-annual": "fan",
+    "ask-rgv-super-monthly": "super_fan",
+    "ask-rgv-super-annual": "super_fan",
 }
 
 _PACK_TURNS = {
@@ -40,7 +46,12 @@ _PACK_TURNS = {
     "ask_rgv_pack_12": 12,
 }
 
-_ANNUAL_PRODUCTS = {"ask_rgv_fan_annual", "ask_rgv_super_annual"}
+_ANNUAL_PRODUCTS = {
+    "ask_rgv_fan_annual", 
+    "ask_rgv_super_annual",
+    "ask-rgv-fan-annual",
+    "ask-rgv-super-annual",
+}
 
 
 @router.get("/status")
@@ -92,8 +103,8 @@ async def subscription_status(
 @router.post("/verify", response_model=IAPVerifyResponse)
 async def verify_subscription(body: IAPVerifyRequest, user: dict = Depends(require_user)):
     """Receive a Google Play purchase token, verify with Play Developer API, activate subscription."""
-    tier = _SUBSCRIPTION_PRODUCT_TIERS.get(body.product_id)
-    if not tier:
+    # Check if the product_id is at least known as a parent subscription or a specific base plan
+    if body.product_id not in _SUBSCRIPTION_PRODUCT_TIERS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unknown product: {body.product_id}",
@@ -106,12 +117,21 @@ async def verify_subscription(body: IAPVerifyRequest, user: dict = Depends(requi
             detail="Purchase token could not be verified with Google Play",
         )
 
-    period = "annual" if body.product_id in _ANNUAL_PRODUCTS else "monthly"
+    # Use the specific base plan ID from Google Play if available to determine tier and period accurately
+    effective_product_id = purchase.get("base_plan_id") or body.product_id
+    tier = _SUBSCRIPTION_PRODUCT_TIERS.get(effective_product_id) or _SUBSCRIPTION_PRODUCT_TIERS.get(body.product_id)
+    
+    if not tier:
+        # Should not happen given the initial check, but for safety:
+        tier = "fan" if "fan" in effective_product_id else "super_fan"
+
+    period = "annual" if (effective_product_id in _ANNUAL_PRODUCTS or "annual" in effective_product_id) else "monthly"
+    
     await queries.activate_iap_subscription(
         user_id=user["sub"],
         tier=tier,
         purchase_token=body.purchase_token,
-        product_id=body.product_id,
+        product_id=effective_product_id,
         subscription_period=period,
         expiry_time_millis=purchase.get("expiry_time_millis"),
     )
@@ -144,15 +164,16 @@ async def rtdn_webhook(request: Request):
     # notificationType constants: 1=RECOVERED, 2=RENEWED, 3=CANCELED, 4=PURCHASED,
     # 12=EXPIRED, 13=PAUSED (etc.) — handle renewal, cancel, expire
     if notification_type in (2, 4):  # RENEWED or PURCHASED
-        tier = _SUBSCRIPTION_PRODUCT_TIERS.get(product_id or "")
-        if tier:
-            purchase = await verify_subscription_purchase(product_id, purchase_token)
-            if purchase.get("valid"):
-                period = "annual" if product_id in _ANNUAL_PRODUCTS else "monthly"
+        purchase = await verify_subscription_purchase(product_id or "", purchase_token)
+        if purchase.get("valid"):
+            effective_product_id = purchase.get("base_plan_id") or product_id or ""
+            tier = _SUBSCRIPTION_PRODUCT_TIERS.get(effective_product_id) or _SUBSCRIPTION_PRODUCT_TIERS.get(product_id or "")
+            if tier:
+                period = "annual" if (effective_product_id in _ANNUAL_PRODUCTS or "annual" in effective_product_id) else "monthly"
                 await queries.activate_iap_subscription_by_token(
                     purchase_token=purchase_token,
                     tier=tier,
-                    product_id=product_id,
+                    product_id=effective_product_id,
                     subscription_period=period,
                     expiry_time_millis=purchase.get("expiry_time_millis"),
                 )
