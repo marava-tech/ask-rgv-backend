@@ -182,6 +182,9 @@ async def lifespan(app: FastAPI):
         logger.warning("[startup] prompt_loader init failed (non-fatal): %s", e)
         app.state.prompt_loader = None
 
+    if _check_tts() != "ok":
+        logger.warning("[startup] TTS is misconfigured — SMALLEST_AI_API_KEY or VOICE_ID_* vars missing")
+
     # Pre-synthesize static phrases (crisis, greeting, thinking) so first playback is instant.
     try:
         from services.phrase_cache import warmup_phrase_cache
@@ -230,6 +233,12 @@ app.include_router(feedback.router)
 app.include_router(quiz.router)
 
 
+def _check_tts() -> str:
+    if all([settings.smallest_ai_api_key, settings.voice_id_en, settings.voice_id_te, settings.voice_id_hi]):
+        return "ok"
+    return "misconfigured"
+
+
 async def _probe_http(url: str, timeout: float = 5.0) -> dict[str, str | bool]:
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -275,6 +284,8 @@ async def health():
         checks["redis"] = "ok"
     except Exception as e:
         checks["redis"] = f"error: {e}"
+
+    checks["tts"] = _check_tts()
 
     qdrant_url = f"{settings.qdrant_url}/collections"
     embedding_url = f"{settings.embedding_service_url}/health"

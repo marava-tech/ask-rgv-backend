@@ -33,6 +33,9 @@ class Settings(BaseSettings):
 
     deepgram_api_key: str = ""
     smallest_ai_api_key: str = ""
+    voice_id_en: str = ""
+    voice_id_te: str = ""
+    voice_id_hi: str = ""
     tts_speed: float = 0.9
 
     firebase_service_account_path: str = "/app/firebase-service-account.json"
@@ -81,6 +84,8 @@ class Settings(BaseSettings):
             logger.warning("[config] DEEPGRAM_API_KEY not set — STT disabled")
         if not self.smallest_ai_api_key:
             logger.warning("[config] SMALLEST_AI_API_KEY not set — TTS disabled")
+        if not all([self.voice_id_en, self.voice_id_te, self.voice_id_hi]):
+            logger.warning("[config] VOICE_ID_EN/TE/HI not fully set — TTS will use hardcoded fallback IDs")
         if not self.admin_totp_secret:
             logger.warning("[config] ADMIN_TOTP_SECRET not set — dashboard login uses password fallback")
         if not self.youtube_data_api_key:
