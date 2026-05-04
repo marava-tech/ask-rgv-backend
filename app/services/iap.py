@@ -50,10 +50,17 @@ async def verify_subscription_purchase(product_id: str, purchase_token: str) -> 
         state = result.get("subscriptionState", "")
         valid = state in ("SUBSCRIPTION_STATE_ACTIVE", "SUBSCRIPTION_STATE_IN_GRACE_PERIOD")
         expiry_millis = None
+        base_plan_id = None
         lines = result.get("lineItems", [])
         if lines:
             expiry_millis = lines[0].get("expiryTime")
-        return {"valid": valid, "expiry_time_millis": expiry_millis, "state": state}
+            base_plan_id = lines[0].get("productId")
+        return {
+            "valid": valid, 
+            "expiry_time_millis": expiry_millis, 
+            "state": state,
+            "base_plan_id": base_plan_id
+        }
     except Exception as e:
         logger.error("[iap] verify_subscription_purchase error: %s", e)
         return {"valid": False}
