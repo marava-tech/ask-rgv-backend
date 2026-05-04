@@ -34,7 +34,12 @@ async def verify_subscription_purchase(product_id: str, purchase_token: str) -> 
     service = _get_play_service()
     if service is None:
         logger.warning("[iap] Play service not configured — skipping verification (dev mode)")
-        return {"valid": True, "expiry_time_millis": None}
+        return {
+            "valid": True, 
+            "expiry_time_millis": None,
+            "state": "SUBSCRIPTION_STATE_ACTIVE",
+            "base_plan_id": None
+        }
 
     try:
         result = (
@@ -85,7 +90,7 @@ async def verify_one_time_purchase(product_id: str, purchase_token: str) -> dict
             .execute()
         )
         # purchaseState: 0=PURCHASED, 1=CANCELED, 2=PENDING
-        purchase_state = result.get("purchaseState", 1)
+        purchase_state = result.get("purchaseState", 0)
         return {"valid": purchase_state == 0, "order_id": result.get("orderId")}
     except Exception as e:
         logger.error("[iap] verify_one_time_purchase error: %s", e)
