@@ -481,7 +481,7 @@ async def activate_iap_subscription(
                     INSERT INTO subscriptions
                         (user_id, tier, google_purchase_token, product_id, subscription_period,
                          status, current_period_end)
-                    VALUES ($1, $2, $3, $4, $5, 'active', now() + $6::interval)
+                    VALUES ($1, $2, $3, $4, $5, 'active', now() + $6)
                     ON CONFLICT (google_purchase_token) WHERE google_purchase_token IS NOT NULL DO UPDATE
                         SET status = 'active',
                             tier = EXCLUDED.tier,
@@ -495,7 +495,7 @@ async def activate_iap_subscription(
                 RETURNING upserted.user_id AS user_id, upserted.tier AS tier
                 """,
                 UUID(user_id), tier, purchase_token, product_id, subscription_period,
-                f"{days} days",
+                timedelta(days=days),
             )
     return dict(row) if row else None
 
@@ -508,6 +508,7 @@ async def activate_iap_subscription_by_token(
     expiry_time_millis: str | None,
 ) -> dict | None:
     """Renew/activate by token (from RTDN webhook — no user_id needed, token identifies subscription)."""
+    from datetime import timedelta
     days = 366 if subscription_period == "annual" else 31
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -519,7 +520,7 @@ async def activate_iap_subscription_by_token(
                     SET status = 'active',
                         tier = $2,
                         subscription_period = $3,
-                        current_period_end = now() + $4::interval,
+                        current_period_end = now() + $4,
                         updated_at = now()
                     WHERE google_purchase_token = $1
                     RETURNING user_id, tier
@@ -528,7 +529,7 @@ async def activate_iap_subscription_by_token(
                 FROM updated WHERE users.id = updated.user_id
                 RETURNING updated.user_id AS user_id, updated.tier AS tier
                 """,
-                purchase_token, tier, subscription_period, f"{days} days",
+                purchase_token, tier, subscription_period, timedelta(days=days),
             )
     return dict(row) if row else None
 
