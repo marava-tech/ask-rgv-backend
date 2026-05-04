@@ -481,7 +481,7 @@ async def activate_iap_subscription(
                     INSERT INTO subscriptions
                         (user_id, tier, google_purchase_token, product_id, subscription_period,
                          status, current_period_end)
-                    VALUES ($1, $2, $3, $4, $5, 'active', now() + $6::interval)
+                    VALUES ($1, $2, $3, $4, $5, 'active', now() + $6)
                     ON CONFLICT (google_purchase_token) WHERE google_purchase_token IS NOT NULL DO UPDATE
                         SET status = 'active',
                             tier = EXCLUDED.tier,
@@ -495,7 +495,7 @@ async def activate_iap_subscription(
                 RETURNING upserted.user_id AS user_id, upserted.tier AS tier
                 """,
                 UUID(user_id), tier, purchase_token, product_id, subscription_period,
-                f"{days} days",
+                timedelta(days=days),
             )
     return dict(row) if row else None
 
@@ -508,6 +508,7 @@ async def activate_iap_subscription_by_token(
     expiry_time_millis: str | None,
 ) -> dict | None:
     """Renew/activate by token (from RTDN webhook — no user_id needed, token identifies subscription)."""
+    from datetime import timedelta
     days = 366 if subscription_period == "annual" else 31
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -519,7 +520,7 @@ async def activate_iap_subscription_by_token(
                     SET status = 'active',
                         tier = $2,
                         subscription_period = $3,
-                        current_period_end = now() + $4::interval,
+                        current_period_end = now() + $4,
                         updated_at = now()
                     WHERE google_purchase_token = $1
                     RETURNING user_id, tier
@@ -528,7 +529,7 @@ async def activate_iap_subscription_by_token(
                 FROM updated WHERE users.id = updated.user_id
                 RETURNING updated.user_id AS user_id, updated.tier AS tier
                 """,
-                purchase_token, tier, subscription_period, f"{days} days",
+                purchase_token, tier, subscription_period, timedelta(days=days),
             )
     return dict(row) if row else None
 
@@ -554,9 +555,31 @@ async def expire_subscription_by_token(purchase_token: str) -> None:
             )
 
 
+async def demote_user_subscription(user_id: str) -> bool:
+    """Manually demote a user: expire all active subscriptions and reset tier to seeker."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # 1. Mark all active subscriptions for this user as expired
+            await conn.execute(
+                """
+                UPDATE subscriptions
+                SET status = 'expired', updated_at = now()
+                WHERE user_id = $1 AND status = 'active'
+                """,
+                UUID(user_id),
+            )
+            # 2. Reset user tier
+            row = await conn.fetchrow(
+                "UPDATE users SET tier = 'seeker' WHERE id = $1 RETURNING id",
+                UUID(user_id),
+            )
+            return bool(row)
+
+
 async def expire_ended_subscriptions() -> int:
     """Mark active subscriptions whose period has ended as 'expired' and
-    downgrade the corresponding users to 'free'.  Runs in a single transaction
+    downgrade the corresponding users to 'seeker'.  Runs in a single transaction
     so users and subscriptions never diverge.  Returns the number of users
     downgraded."""
     pool = get_pool()
