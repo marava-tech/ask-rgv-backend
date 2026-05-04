@@ -426,6 +426,18 @@ async def reset_user_quota(user_id: str):
     return {"status": "ok", "user_id": user_id}
 
 
+@router.post("/users/{user_id}/demote", dependencies=[Depends(require_admin)])
+async def demote_user(user_id: str):
+    """Demote a user: expire active subscriptions and reset tier to seeker."""
+    from services.quota import delete_quota_key
+    success = await queries.demote_user_subscription(user_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="User not found")
+    # Also clear their quota so they don't keep premium limits for the rest of the week/day
+    await delete_quota_key(user_id)
+    return {"status": "ok", "user_id": user_id}
+
+
 @router.get("/bug-reports")
 async def list_bug_reports(
     limit: int = 50,

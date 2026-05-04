@@ -555,9 +555,31 @@ async def expire_subscription_by_token(purchase_token: str) -> None:
             )
 
 
+async def demote_user_subscription(user_id: str) -> bool:
+    """Manually demote a user: expire all active subscriptions and reset tier to seeker."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # 1. Mark all active subscriptions for this user as expired
+            await conn.execute(
+                """
+                UPDATE subscriptions
+                SET status = 'expired', updated_at = now()
+                WHERE user_id = $1 AND status = 'active'
+                """,
+                UUID(user_id),
+            )
+            # 2. Reset user tier
+            row = await conn.fetchrow(
+                "UPDATE users SET tier = 'seeker' WHERE id = $1 RETURNING id",
+                UUID(user_id),
+            )
+            return bool(row)
+
+
 async def expire_ended_subscriptions() -> int:
     """Mark active subscriptions whose period has ended as 'expired' and
-    downgrade the corresponding users to 'free'.  Runs in a single transaction
+    downgrade the corresponding users to 'seeker'.  Runs in a single transaction
     so users and subscriptions never diverge.  Returns the number of users
     downgraded."""
     pool = get_pool()

@@ -58,19 +58,21 @@ async def tts_bg(
     prepend_silence: bool = False,
 ) -> bool:
     """Returns True on success, False when both attempts fail (retry-exhausted)."""
+    voice_id = _resolve_voice(lang)
+    text_len = len(text)
     try:
         wav = await synthesise_sentence(text, lang, prepend_silence=prepend_silence)
         results[seq] = wav
         return True
     except Exception as e:
-        _log.warning("[tts_bg] seq=%d first attempt failed: %r — retrying in 500ms", seq, e)
+        _log.error("[TTS_FAILED] seq=%d voice_id=%s text_len=%d attempt=1: %r — retrying in 500ms", seq, voice_id, text_len, e)
     await asyncio.sleep(0.5)
     try:
         wav = await synthesise_sentence(text, lang, prepend_silence=prepend_silence)
         results[seq] = wav
         return True
     except Exception as e:
-        _log.error("[tts_bg] seq=%d retry also failed: %r", seq, e)
+        _log.error("[TTS_FAILED] seq=%d voice_id=%s text_len=%d attempt=2: %r", seq, voice_id, text_len, e)
         results[seq] = b""
         return False
 
@@ -154,6 +156,10 @@ def _prepend_silence(wav_bytes: bytes, ms: int = 80, sample_rate: int = 24000) -
 
 
 def _resolve_voice(language: str) -> str:
+    _settings_map = {"en": settings.voice_id_en, "te": settings.voice_id_te, "hi": settings.voice_id_hi}
+    from_settings = _settings_map.get(language, "")
+    if from_settings:
+        return from_settings
     return _VOICE_MAP.get(language, _VOICE_MAP["en"])
 
 

@@ -15,6 +15,7 @@ from services import session as session_svc
 from services import stt_stream
 from services.claude import sonnet_stream
 from services.crisis import detect_crisis, get_safety_response
+from services.guardrails import detect_jailbreak, get_guardrail_response
 from services.embedding import embed_query
 from services.intent import classify_intent
 from services.language import get_session_language, set_session_language
@@ -233,6 +234,15 @@ async def voice_stream(
         await dg_task
         return
 
+    # Jailbreak / identity-probe check — after crisis, before RAG/LLM
+    is_jailbreak, jb_category = detect_jailbreak(transcript)
+    if is_jailbreak:
+        await _send({"type": "safety", "text": get_guardrail_response(jb_category, lang)})
+        await _send({"type": "done"})
+        await ws.close()
+        await dg_task
+        return
+
     # RAG + LLM + TTS — speculative embed may have already warmed the cache
     history, rag_chunks, style_anchors, intent = await asyncio.gather(
         session_svc.get_history(session_id),
@@ -303,6 +313,7 @@ async def voice_stream(
                     })
                 else:
                     await _send({"type": "error", "code": "TTS_FAILED"})
+                    _log.error("[TTS_FAILED] seq=%d session=%s", seq, session_id)
 
         # Flush tail sentence
         if sentence_buf.strip():
@@ -325,6 +336,7 @@ async def voice_stream(
                     })
                 else:
                     await _send({"type": "error", "code": "TTS_FAILED"})
+                    _log.error("[TTS_FAILED] seq=%d session=%s", seq, session_id)
 
     except Exception as e:
         pipeline_error = e

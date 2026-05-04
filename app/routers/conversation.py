@@ -24,6 +24,7 @@ from models.schemas import (
 from services import session as session_svc
 from services.claude import sonnet_stream
 from services.crisis import detect_crisis, get_safety_response
+from services.guardrails import detect_jailbreak, get_guardrail_response
 from services.intent import classify_intent
 from services.language import detect_language, get_session_language, set_session_language
 from services.quota import get_redis as _get_redis
@@ -137,6 +138,13 @@ async def conversation_turn(request: Request, body: TurnRequest, user: dict | No
             if is_crisis:
                 asyncio.create_task(queries.log_crisis_event(body.session_id, trigger))
                 yield _sse("safety", {"text": get_safety_response(lang)})
+                yield _sse("done", {})
+                return
+
+            # Jailbreak / identity-probe check — after crisis, before RAG/LLM
+            is_jailbreak, jb_category = detect_jailbreak(body.message)
+            if is_jailbreak:
+                yield _sse("safety", {"text": get_guardrail_response(jb_category, lang)})
                 yield _sse("done", {})
                 return
 
