@@ -78,25 +78,44 @@ async def record_user_activity(user_id: str) -> dict:
     pool = get_pool()
     row = await pool.fetchrow(
         """
-        WITH updated AS (
-            UPDATE users
-            SET 
-                current_streak = CASE 
-                    WHEN last_active_date = CURRENT_DATE THEN current_streak
-                    WHEN last_active_date = CURRENT_DATE - INTERVAL '1 day' THEN current_streak + 1
+        WITH previous AS (
+            SELECT
+                id,
+                current_streak,
+                longest_streak,
+                last_active_date,
+                date_trunc('week', last_active_date::timestamp)::date AS last_active_week,
+                date_trunc('week', CURRENT_DATE::timestamp)::date AS current_week
+            FROM users
+            WHERE id = $1
+            FOR UPDATE
+        ),
+        updated AS (
+            UPDATE users AS u
+            SET
+                current_streak = CASE
+                    WHEN p.last_active_week = p.current_week THEN p.current_streak
+                    WHEN p.last_active_week = (p.current_week - INTERVAL '1 week')::date THEN p.current_streak + 1
                     ELSE 1
                 END,
                 longest_streak = GREATEST(
-                    longest_streak,
-                    CASE 
-                        WHEN last_active_date = CURRENT_DATE THEN current_streak
-                        WHEN last_active_date = CURRENT_DATE - INTERVAL '1 day' THEN current_streak + 1
+                    p.longest_streak,
+                    CASE
+                        WHEN p.last_active_week = p.current_week THEN p.current_streak
+                        WHEN p.last_active_week = (p.current_week - INTERVAL '1 week')::date THEN p.current_streak + 1
                         ELSE 1
                     END
                 ),
                 last_active_date = CURRENT_DATE
-            WHERE id = $1
-            RETURNING current_streak, longest_streak, (last_active_date IS DISTINCT FROM CURRENT_DATE) as streak_updated
+            FROM previous AS p
+            WHERE u.id = p.id
+            RETURNING
+                u.current_streak,
+                u.longest_streak,
+                CASE
+                    WHEN p.last_active_week = p.current_week THEN FALSE
+                    ELSE TRUE
+                END AS streak_updated
         )
         SELECT * FROM updated
         """,
