@@ -38,6 +38,15 @@ async def upsert_chunks(
         })
 
     async with httpx.AsyncClient(timeout=30.0) as client:
+        # Remove any pre-existing chunks for this video so re-ingestion doesn't
+        # accumulate duplicate points (Qdrant upsert keys on point ID, not payload).
+        if video_id:
+            delete_response = await client.post(
+                f"{qdrant_url}/collections/{collection}/points/delete",
+                json={"filter": {"must": [{"key": "video_id", "match": {"value": video_id}}]}},
+            )
+            delete_response.raise_for_status()
+
         response = await client.put(
             f"{qdrant_url}/collections/{collection}/points",
             json={"points": points},
