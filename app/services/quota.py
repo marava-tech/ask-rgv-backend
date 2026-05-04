@@ -170,7 +170,12 @@ async def get_quota_remaining(user_id: str | None, device_id: str | None, tier: 
         return -1
     r = get_redis()
     used = int(await r.get(_quota_key(user_id, device_id, tier)) or 0)
-    return max(0, limit - used)
+    daily_remaining = max(0, limit - used)
+    if daily_remaining > 0 or not user_id:
+        return daily_remaining
+    # Daily exhausted — include pack pool so pre-turn check passes when packs are available
+    from db import queries
+    return await queries.get_pack_seconds_remaining(user_id)
 
 
 async def add_quota_usage(
@@ -185,10 +190,23 @@ async def add_quota_usage(
 
 
 async def try_consume_pack_turn(user_id: str | None) -> bool:
-    """For Seeker users: consume one pack turn before falling back to daily quota. Returns True if consumed."""
+    """Legacy: consume one turn-based pack turn. Returns True if consumed."""
     if not user_id:
         return False
     from db import queries
+    return await queries.consume_pack_turn(user_id)
+
+
+async def try_consume_pack_seconds_for_turn(user_id: str | None, seconds: int) -> bool:
+    """Deduct `seconds` from the user's pack pool after daily quota is exhausted.
+    Returns True if the pack pool covered the turn (fully or partially)."""
+    if not user_id:
+        return False
+    from db import queries
+    deducted = await queries.consume_pack_seconds(user_id, seconds)
+    if deducted > 0:
+        return True
+    # Fall back to legacy turn-based pack
     return await queries.consume_pack_turn(user_id)
 
 
