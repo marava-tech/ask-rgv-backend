@@ -759,18 +759,22 @@ async def get_admin_stats() -> dict:
         "SELECT AVG(latency_ms) FROM turns WHERE latency_ms IS NOT NULL AND created_at > now() - interval '7 days'"
     )
     # Memory coverage: % of Super Fan users with non-empty memory summary
-    memory_row = await pool.fetchrow(
-        """
-        SELECT
-            COUNT(*) FILTER (WHERE u.tier = 'super_fan')::int AS super_fan_count,
-            COUNT(*) FILTER (WHERE u.tier = 'super_fan' AND m.summary IS NOT NULL AND m.summary != '')::int AS memory_count
-        FROM users u
-        LEFT JOIN user_memory m ON m.user_id = u.id
-        """
-    )
-    super_fan_count = memory_row["super_fan_count"] or 0
-    memory_count = memory_row["memory_count"] or 0
-    memory_coverage_pct = round(memory_count / super_fan_count * 100) if super_fan_count > 0 else None
+    try:
+        memory_row = await pool.fetchrow(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE u.tier = 'super_fan')::int AS super_fan_count,
+                COUNT(*) FILTER (WHERE u.tier = 'super_fan' AND m.summary IS NOT NULL AND m.summary != '')::int AS memory_count
+            FROM users u
+            LEFT JOIN user_memory m ON m.user_id = u.id
+            """
+        )
+        super_fan_count = memory_row["super_fan_count"] or 0
+        memory_count = memory_row["memory_count"] or 0
+        memory_coverage_pct = round(memory_count / super_fan_count * 100) if super_fan_count > 0 else None
+    except Exception:
+        super_fan_count = 0
+        memory_coverage_pct = None
     return {
         "active_users_today": active_users,
         "total_sessions": total_sessions,
