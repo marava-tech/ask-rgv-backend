@@ -10,6 +10,9 @@ logger = logging.getLogger(__name__)
 SEARCH_LIMIT = 10
 RERANK_TOP_K = 5
 QUALITY_THRESHOLD = 2.5
+# RRF scores: max ~0.016 for a top hit in one list, ~0.032 for top hit in both.
+# Below 0.02 means the chunk ranked low in both lists — treat as noise.
+MIN_RRF_SCORE = 0.02
 
 _http_client = httpx.AsyncClient(timeout=15.0, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5))
 
@@ -128,9 +131,13 @@ async def rerank_with_haiku(query: str, chunks: list[dict]) -> list[dict]:
 
 async def search_chunks(query: str) -> list[dict]:
     fused = await hybrid_search(query)
-    qualified = [c for c in fused if c["payload"].get("quality_score", 3) >= QUALITY_THRESHOLD]
+    # Drop noise matches before quality filtering — low RRF score means irrelevant in both lists
+    above_threshold = [c for c in fused if c["score"] >= MIN_RRF_SCORE]
+    qualified = [c for c in above_threshold if c["payload"].get("quality_score", 3) >= QUALITY_THRESHOLD]
     if not qualified:
-        qualified = fused
+        qualified = above_threshold
+    if not qualified:
+        return []
     candidates = qualified[:SEARCH_LIMIT]
     if settings.rag_rerank_enabled:
         return await rerank_with_haiku(query, candidates)
