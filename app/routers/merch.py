@@ -68,6 +68,9 @@ async def initiate_order(body: InitiateOrderRequest, user: dict = Depends(requir
     if not product or not product["enabled"]:
         raise HTTPException(status_code=404, detail="Product not found")
 
+    if product.get("is_out_of_stock"):
+        raise HTTPException(status_code=409, detail="product_out_of_stock")
+
     variant_ids = [v["id"] for v in product.get("variants", [])]
     if body.variant_id not in variant_ids:
         raise HTTPException(status_code=400, detail="Invalid variant")

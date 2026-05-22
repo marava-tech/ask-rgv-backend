@@ -1147,7 +1147,7 @@ async def list_merch_products(enabled_only: bool = True) -> list[dict]:
     query = """
         SELECT
             p.id, p.name, p.description, p.price_inr, p.image_url, p.variants, p.enabled,
-            p.presale_start_at, p.presale_end_at, p.presale_discount_pct,
+            p.presale_start_at, p.presale_end_at, p.presale_discount_pct, p.is_out_of_stock,
             COUNT(o.id)::int as recent_bought_count
         FROM merch_products p
         LEFT JOIN merch_orders o ON p.id = o.product_id
@@ -1174,7 +1174,7 @@ async def get_merch_product(product_id: str) -> dict | None:
     query = """
         SELECT
             p.id, p.name, p.description, p.price_inr, p.image_url, p.variants, p.enabled,
-            p.presale_start_at, p.presale_end_at, p.presale_discount_pct,
+            p.presale_start_at, p.presale_end_at, p.presale_discount_pct, p.is_out_of_stock,
             COUNT(o.id)::int as recent_bought_count
         FROM merch_products p
         LEFT JOIN merch_orders o ON p.id = o.product_id
@@ -1231,7 +1231,7 @@ async def update_merch_product(product_id: str, updates: dict) -> dict | None:
     row = await pool.fetchrow(
         f"UPDATE merch_products SET {', '.join(sets)} WHERE id = ${i} "
         f"RETURNING id, name, description, price_inr, image_url, variants, enabled, "
-        f"presale_start_at, presale_end_at, presale_discount_pct",
+        f"presale_start_at, presale_end_at, presale_discount_pct, is_out_of_stock",
         *vals,
     )
     if not row:

@@ -258,6 +258,7 @@ class MerchProductUpdate(BaseModel):
     presale_start_at: datetime | None = None
     presale_end_at: datetime | None = None
     presale_discount_pct: int | None = None
+    is_out_of_stock: bool | None = None
 
 
 class MerchProductOut(BaseModel):
@@ -274,6 +275,7 @@ class MerchProductOut(BaseModel):
     variants: list[MerchVariant] = []
     enabled: bool
     recent_bought_count: int = 0
+    is_out_of_stock: bool = False
 
 
 class ShippingAddress(BaseModel):
