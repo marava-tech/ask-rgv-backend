@@ -1,16 +1,16 @@
 # Ask RGV Backend — build all service images → push to GHCR → SSH deploy on VPS.
 #
-# Build jobs run in parallel. bge-m3 is skipped unless embeddings/ changed.
+# Build jobs run in parallel. ask-rgv-embed is skipped unless embeddings/ changed.
 # GHA layer cache keeps warm builds under 2 minutes.
 #
-# Migrations are baked into the askrgv-backend image (migrations/ is copied in
+# Migrations are baked into the ask-rgv-backend image (migrations/ is copied in
 # by the Dockerfile). The app's db/migrations.py runner applies any pending
 # migrations at startup — no manual SCP or psql steps needed.
 #
 # Images built:
-#   ghcr.io/marava-tech/askrgv-backend:latest
-#   ghcr.io/marava-tech/askrgv-ingestion:latest
-#   ghcr.io/marava-tech/askrgv-bge-m3:latest
+#   ghcr.io/marava-tech/ask-rgv-backend:latest
+#   ghcr.io/marava-tech/ask-rgv-ingestion:latest
+#   ghcr.io/marava-tech/ask-rgv-embed:latest
 #
 # Secrets required:
 #   SERVER_HOST, SERVER_USER, SERVER_SSH_KEY
@@ -26,7 +26,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: askrgv-backend-${{ github.ref }}
+  group: ask-rgv-backend-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -45,9 +45,9 @@ jobs:
           context: ./
           file: ./app/Dockerfile
           push: true
-          tags: ghcr.io/marava-tech/askrgv-backend:latest
-          cache-from: type=gha,scope=askrgv-backend
-          cache-to: type=gha,mode=max,scope=askrgv-backend
+          tags: ghcr.io/marava-tech/ask-rgv-backend:latest
+          cache-from: type=gha,scope=ask-rgv-backend
+          cache-to: type=gha,mode=max,scope=ask-rgv-backend
 
   build-ingestion:
     runs-on: ubuntu-latest
@@ -63,11 +63,11 @@ jobs:
         with:
           context: ./ingestion-worker
           push: true
-          tags: ghcr.io/marava-tech/askrgv-ingestion:latest
-          cache-from: type=gha,scope=askrgv-ingestion
-          cache-to: type=gha,mode=max,scope=askrgv-ingestion
+          tags: ghcr.io/marava-tech/ask-rgv-ingestion:latest
+          cache-from: type=gha,scope=ask-rgv-ingestion
+          cache-to: type=gha,mode=max,scope=ask-rgv-ingestion
 
-  build-bge-m3:
+  build-embed:
     runs-on: ubuntu-latest
     outputs:
       rebuilt: ${{ steps.filter.outputs.embeddings }}
@@ -92,12 +92,12 @@ jobs:
         with:
           context: ./embeddings
           push: true
-          tags: ghcr.io/marava-tech/askrgv-bge-m3:latest
-          cache-from: type=gha,scope=askrgv-bge-m3
-          cache-to: type=gha,mode=max,scope=askrgv-bge-m3
+          tags: ghcr.io/marava-tech/ask-rgv-embed:latest
+          cache-from: type=gha,scope=ask-rgv-embed
+          cache-to: type=gha,mode=max,scope=ask-rgv-embed
 
   deploy:
-    needs: [build-backend, build-ingestion, build-bge-m3]
+    needs: [build-backend, build-ingestion, build-embed]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -131,18 +131,18 @@ jobs:
 
       - name: Deploy on server via SSH
         env:
-          BGE_REBUILT: ${{ needs.build-bge-m3.outputs.rebuilt }}
+          EMBED_REBUILT: ${{ needs.build-embed.outputs.rebuilt }}
         run: |
           ssh -i ~/.ssh/deploy_key \
             "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
-            "BGE_REBUILT='${BGE_REBUILT}' bash -s" << 'ENDSSH'
+            "EMBED_REBUILT='${EMBED_REBUILT}' bash -s" << 'ENDSSH'
           set -euo pipefail
-          COMPOSE="docker compose -f /root/server-setup/services/ask-rgv-backend/docker-compose.yml --env-file /root/server-setup/.env"
+          COMPOSE="docker compose -f /root/server-v2/services/ask-rgv-backend/docker-compose.yml --env-file /root/server-v2/.env"
 
-          $COMPOSE up -d --no-recreate askrgv-postgres askrgv-redis askrgv-qdrant
+          $COMPOSE up -d --no-recreate ask-rgv-postgres ask-rgv-redis ask-rgv-qdrant
 
           for i in $(seq 1 15); do
-            docker exec askrgv-postgres pg_isready -U askrgv -d askrgv && break
+            docker exec ask-rgv-postgres pg_isready -U askrgv -d askrgv && break
             echo "Waiting for postgres... ($i/15)"; sleep 2
           done
 
@@ -156,27 +156,27 @@ jobs:
             echo "ERROR: failed to pull $service after 3 attempts" && return 1
           }
 
-          pull_with_retry askrgv-backend
-          pull_with_retry askrgv-ingestion
+          pull_with_retry ask-rgv-backend
+          pull_with_retry ask-rgv-ingestion
 
-          if [ "${BGE_REBUILT}" = "true" ]; then
-            echo "embeddings/ changed — pulling bge-m3"
-            pull_with_retry askrgv-bge-m3
-            $COMPOSE up -d --force-recreate askrgv-bge-m3
+          if [ "${EMBED_REBUILT}" = "true" ]; then
+            echo "embeddings/ changed — pulling ask-rgv-embed"
+            pull_with_retry ask-rgv-embed
+            $COMPOSE up -d --force-recreate ask-rgv-embed
           else
-            echo "embeddings/ unchanged — skipping bge-m3 pull"
-            if docker ps --filter "name=askrgv-bge-m3" --filter "status=running" -q | grep -q .; then
-              echo "askrgv-bge-m3 already running — no action needed"
+            echo "embeddings/ unchanged — skipping ask-rgv-embed pull"
+            if docker ps --filter "name=ask-rgv-embed" --filter "status=running" -q | grep -q .; then
+              echo "ask-rgv-embed already running — no action needed"
             else
-              $COMPOSE up -d --no-recreate askrgv-bge-m3
+              $COMPOSE up -d --no-recreate ask-rgv-embed
             fi
           fi
 
           # Migrations are baked into the image and applied automatically at startup
           # by db/migrations.py — no manual psql steps needed here.
-          $COMPOSE up -d --force-recreate askrgv-backend askrgv-ingestion
+          $COMPOSE up -d --force-recreate ask-rgv-backend ask-rgv-ingestion
 
           docker image prune -f
           sleep 10
-          docker logs askrgv-backend --tail 30
+          docker logs ask-rgv-backend --tail 30
           ENDSSH
