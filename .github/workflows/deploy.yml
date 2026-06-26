@@ -159,17 +159,21 @@ jobs:
           pull_with_retry ask-rgv-backend
           pull_with_retry ask-rgv-ingestion
 
+          embed_image_exists() {
+            docker manifest inspect ghcr.io/marava-tech/ask-rgv-embed:latest > /dev/null 2>&1
+          }
+
           if [ "${EMBED_REBUILT}" = "true" ]; then
             echo "embeddings/ changed — pulling ask-rgv-embed"
             pull_with_retry ask-rgv-embed
             $COMPOSE up -d --force-recreate ask-rgv-embed
+          elif docker ps --filter "name=ask-rgv-embed" --filter "status=running" -q | grep -q .; then
+            echo "ask-rgv-embed already running — no action needed"
+          elif embed_image_exists; then
+            echo "ask-rgv-embed not running — starting from existing image"
+            $COMPOSE up -d --no-recreate ask-rgv-embed
           else
-            echo "embeddings/ unchanged — skipping ask-rgv-embed pull"
-            if docker ps --filter "name=ask-rgv-embed" --filter "status=running" -q | grep -q .; then
-              echo "ask-rgv-embed already running — no action needed"
-            else
-              $COMPOSE up -d --no-recreate ask-rgv-embed
-            fi
+            echo "ask-rgv-embed image not yet built — skipping (will start after first embeddings/ push)"
           fi
 
           # Migrations are baked into the image and applied automatically at startup
